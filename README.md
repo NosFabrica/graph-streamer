@@ -125,6 +125,7 @@ The service's own keys:
 | key | meaning |
 |---|---|
 | `graph_streamer:dirty` | HASH author → generation: authors waiting to be recomputed from the relay |
+| `graph_streamer:live_since` | epoch seconds the live stream resumes from after a restart (its last resume point) |
 | `graph_streamer:audit` | HASH: the last audit's start and finish, and per kind `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
 
 A dirty mark is cleared only after the author is written, and only if its generation is still

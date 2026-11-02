@@ -33,6 +33,11 @@ interface StreamerState {
 
     fun lastAuditFinishedAt(): Long?
 
+    /** Where the live stream resumes after a restart: the last `since` it would have reconnected from. */
+    fun liveSince(): Long?
+
+    fun putLiveSince(since: Long)
+
     fun putAuditReport(report: Map<String, String>)
 }
 

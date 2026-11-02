@@ -6,6 +6,7 @@ import redis.clients.jedis.JedisPool
  * Keys (all this service's own; the graph's sets are written by [Neo4jRedisGraph]):
  * - `graph_streamer:dirty` — HASH author → generation: authors waiting to be recomputed from the relay.
  * - `graph_streamer:audit` — HASH: the last negentropy audit's counters.
+ * - `graph_streamer:live_since` — epoch seconds the live stream resumes from after a restart.
  */
 class RedisStreamerState(
     private val pool: JedisPool,
@@ -38,6 +39,12 @@ class RedisStreamerState(
 
     override fun lastAuditFinishedAt(): Long? = pool.resource.use { it.hget(AUDIT_KEY, "finished_at")?.toLongOrNull() }
 
+    override fun liveSince(): Long? = pool.resource.use { it.get(LIVE_SINCE_KEY)?.toLongOrNull() }
+
+    override fun putLiveSince(since: Long) {
+        pool.resource.use { it.set(LIVE_SINCE_KEY, since.toString()) }
+    }
+
     override fun putAuditReport(report: Map<String, String>) {
         if (report.isEmpty()) return
         pool.resource.use { it.hset(AUDIT_KEY, report) }
@@ -46,6 +53,7 @@ class RedisStreamerState(
     companion object {
         const val DIRTY_KEY = "graph_streamer:dirty"
         const val AUDIT_KEY = "graph_streamer:audit"
+        const val LIVE_SINCE_KEY = "graph_streamer:live_since"
 
         /** HDEL each author only if its generation is still the one the projector read. */
         private val CLEAR_IF_UNCHANGED =

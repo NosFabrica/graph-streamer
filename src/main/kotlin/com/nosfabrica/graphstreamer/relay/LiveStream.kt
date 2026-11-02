@@ -2,6 +2,7 @@ package com.nosfabrica.graphstreamer.relay
 
 import com.nosfabrica.graphstreamer.RelayFilters
 import com.nosfabrica.graphstreamer.projection.Projector
+import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -21,6 +22,10 @@ import org.slf4j.LoggerFactory
  * - **Reconnects resume.** The client reconnects on its own. `since` moves forward only while
  *   the subscription is known to be caught up (EOSE, live events), so after an outage the REQ
  *   asks from just before it began, minus [overlapSeconds]. Re-applying an event writes nothing.
+ * - **Restarts resume.** Each resume point is saved ([StreamerState.putLiveSince]) and the next
+ *   process starts from it. It covers what reached this stream, which can run ahead of what the
+ *   projector applied by the inbox's backlog; the overlap covers a backlog shorter than it, and
+ *   the audit anything beyond.
  * - **A CLOSED ends the stream, and the process.** After a CLOSED the client won't re-send the
  *   REQ on its own, so the subscription would go quiet for good. This client signs nothing, so
  *   every CLOSED but a rate limit with a stated back-off ends [run]. Main lets it stop the
@@ -32,6 +37,7 @@ class LiveStream(
     private val client: INostrClient,
     private val relay: NormalizedRelayUrl,
     private val projector: Projector,
+    private val state: StreamerState,
     private val overlapSeconds: Long,
     private val sinceUpdateIntervalMs: Long,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
@@ -46,10 +52,11 @@ class LiveStream(
                     .subscribeEvents(
                         relay = relay,
                         filters = RelayFilters.live(),
-                        since = clock() - overlapSeconds,
+                        since = state.liveSince() ?: (clock() - overlapSeconds),
                         overlapSeconds = overlapSeconds,
                         sinceUpdateIntervalMs = sinceUpdateIntervalMs,
                         endsOnClosed = { true },
+                        onResumePoint = { state.putLiveSince(it) },
                         nowInSeconds = clock,
                     ).collect { inbox.send(it) }
             }

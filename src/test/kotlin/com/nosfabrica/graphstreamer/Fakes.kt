@@ -30,6 +30,14 @@ class FakeState : StreamerState {
 
     override fun lastAuditFinishedAt() = audit["finished_at"]?.toLong()
 
+    var liveSince: Long? = null
+
+    override fun liveSince() = liveSince
+
+    override fun putLiveSince(since: Long) {
+        liveSince = since
+    }
+
     override fun putAuditReport(report: Map<String, String>) {
         audit.putAll(report)
     }
