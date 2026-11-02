@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory
  * its sync's writes out to live subscribers like any other publish, so this sees each new list,
  * report, deletion and vanish as the relay stores it.
  *
- * Built on [liveEvents]:
+ * Built on [subscribeEvents]:
  * - **Reconnects resume.** The client reconnects on its own. `since` moves forward only while
  *   the subscription is known to be caught up (EOSE, live events), so after an outage the REQ
  *   asks from just before it began, minus [overlapSeconds]. Re-applying an event writes nothing.
@@ -43,7 +43,7 @@ class LiveStream(
             val inbox = Channel<Event>(INBOX)
             launch {
                 client
-                    .liveEvents(
+                    .subscribeEvents(
                         relay = relay,
                         filters = RelayFilters.live(),
                         since = clock() - overlapSeconds,
