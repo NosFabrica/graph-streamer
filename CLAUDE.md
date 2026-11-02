@@ -1,44 +1,48 @@
 # graph-streamer
 
-Long-running Kotlin service: a Quartz SQLite mirror of the search relay's graph kinds (live REQ +
-negentropy audit), projected into Brainstorm's Neo4j graph and Redis sets. Read
-[README.md](README.md) first; its "What it writes" tables are a contract with `brainstorm_server`
-and `brainstorm_graperank_algorithm`.
+Long-running, stateless Kotlin service: the search relay's follow lists, mute lists, reports and
+kind-10040 designations, streamed (live REQ) and audited (NIP-77) into Brainstorm's Neo4j graph
+and Redis sets. No local event store: the relay is the store, and the graph records which events
+its edges came from. Read [README.md](README.md) first. Its "What it writes" tables are a contract
+with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 
 ## Map
 
 | Path | What |
 |---|---|
-| `Main.kt` | Wires the store, relay client, Redis and Neo4j; runs the live stream, projector, audit and stats loops. |
+| `Main.kt` | Wires the relay client, Redis and Neo4j; runs the live stream, recompute, audit and stats loops. |
 | `Config.kt` | Environment. `DRY_RUN` defaults to true. |
-| `Mirrored.kt` | The mirrored filters. The live REQ, the audit and the store all read them. |
-| `mirror/Mirror.kt` | The only writer to the store. It marks authors dirty before writing. |
-| `mirror/LiveStream.kt` | The REQ, re-sent with a moving `since`. |
-| `mirror/Audit.kt` | NIP-77 reconcile per filter: download needs, delete haves under guards. |
-| `mirror/GraphIndexing.kt` | Store indexing: no `p` index on kinds 3/10000, no FTS. |
-| `projection/GraphRules.kt` | Pure: an author's surviving events → their edges. Rules match brainstorm_server's. |
-| `projection/Projector.kt` | Dirty authors → diff against the graph → writes (or dry-run counts). |
-| `store/` | `StreamerState` (dirty set, audit report) and `GraphSink` (Neo4j + Redis), with their Redis/Neo4j implementations. |
+| `RelayFilters.kt` | Every filter sent to the relay: live, audit, by-author. |
+| `projection/GraphRules.kt` | Pure: `apply` (events onto an author's state) and `fromRelay` (state from the relay's events). Parsing matches brainstorm_server's. |
+| `projection/Projector.kt` | The only graph writer: applies events, recomputes dirty authors, under one lock. |
+| `relay/LiveStream.kt` | The REQ, re-sent with a moving `since`. |
+| `relay/Audit.kt` | NIP-77 reconcile per kind against the graph's bookkeeping; `AbsenceGuard`; `GraphListIndex`. |
+| `relay/SearchRelayReader.kt` | By-author reads for recomputes; throws unless the relay drained. |
+| `store/` | `StreamerState` (dirty set, audit report), `GraphStore` (Neo4j + Redis), `AuthorSource`, and their implementations. |
 
 ## Rules
 
 - **The search relay is the source of truth.** Never add a second upstream. One relay's
-  absence would no longer mean anything, and the audit could not delete.
-- **Never delete on absence without a completed reconcile.** A paged fallback fills the mirror
-  only; it must not delete. Keep every guard in `Audit` unless you replace it with a stronger one.
-- **Project from the store, never from the event.** A handler that applies one event's diff
-  can't see deletions, vanishes, expiries or audit removals. Recomputing the author can.
-- **Every store write goes through `Mirror`**, which marks authors dirty first. A write
-  anywhere else is a write the graph never hears about.
-- **Changing a filter in `Mirrored` changes what the audit compares.** A new filter's whole past
-  downloads on the next audit. Events a narrowed filter no longer covers are never compared
-  again: they stay in the mirror, and still project, until the same change deletes them. Treat
-  it as a data migration, not a refactor.
-- **Edge names and Redis key names are cross-repo contracts** (the server's consumer and its
-  `backfill_redis_relationships`, the GrapeRank worker). Never interpolate data into Cypher.
-  Relationship types come from `Edge`.
+  absence would no longer mean anything, and nothing could ever leave the graph.
+- **Applying an event only ever adds or replaces.** Anything that removes goes through a recompute
+  from the relay. A handler that applies a deletion itself can't see vanishes, expiries or
+  `k`-less deletions, and it drifts from the relay.
+- **A recompute acts only on a read that drained** (`IncompleteRead` otherwise). Half an answer
+  reads as deletions.
+- **Never act on absence without a completed reconcile.** A paged fallback fills the graph only.
+  Keep every guard in `AbsenceGuard` unless you replace it with a stronger one.
+- **Every graph write goes through `Projector`**, under its lock, with edges and bookkeeping in
+  one Neo4j transaction. Bookkeeping that disagrees with the edges makes the audit wrong.
+- **Record every event the audit compares, even when it yields no edge** (an empty list, a note
+  report). Otherwise it is downloaded again on every audit.
+- **Changing an audit filter in `RelayFilters` changes what is compared with the bookkeeping.**
+  Treat it as a data migration.
+- **Edge names, bookkeeping properties and Redis key names are cross-repo contracts** (the
+  server's consumer and its `backfill_redis_relationships`, the GrapeRank worker). Never
+  interpolate data into Cypher. Relationship types and property names come from `Edge` and
+  `ListKind`.
 - A new test must fail with the change it guards reverted. Check the test count, not only the
-  exit code.
+  exit code: a compile error also prints no failures.
 
 ## Build
 

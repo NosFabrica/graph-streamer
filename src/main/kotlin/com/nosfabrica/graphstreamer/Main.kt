@@ -1,17 +1,16 @@
 package com.nosfabrica.graphstreamer
 
-import com.nosfabrica.graphstreamer.mirror.Audit
-import com.nosfabrica.graphstreamer.mirror.GraphIndexing
-import com.nosfabrica.graphstreamer.mirror.LiveStream
-import com.nosfabrica.graphstreamer.mirror.Mirror
 import com.nosfabrica.graphstreamer.projection.Projector
+import com.nosfabrica.graphstreamer.relay.AbsenceGuard
+import com.nosfabrica.graphstreamer.relay.Audit
+import com.nosfabrica.graphstreamer.relay.LiveStream
+import com.nosfabrica.graphstreamer.relay.SearchRelayReader
 import com.nosfabrica.graphstreamer.store.Neo4jRedisGraph
 import com.nosfabrica.graphstreamer.store.RedisStreamerState
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
-import com.vitorpamplona.quartz.nip01Core.store.sqlite.EventStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -27,9 +26,9 @@ import kotlin.system.exitProcess
 private val log = LoggerFactory.getLogger("graph-streamer")
 
 /**
- * Long-running: one replica (the mirror is a single SQLite file and the dirty set assumes one
- * projector). Any loop that dies takes the process with it, and Kubernetes restarts it; the
- * dirty set and the mirror carry everything across the restart.
+ * Long-running and stateless: one replica, because it is the graph's one writer for these edges
+ * and the dirty set assumes one recomputer. Any loop that dies takes the process with it, and
+ * Kubernetes restarts it; the graph's bookkeeping and the dirty set carry everything across.
  */
 fun main() {
     val config = Config.fromEnv()
@@ -46,11 +45,8 @@ fun main() {
 
 private suspend fun run(config: Config) {
     val relay = RelayUrlNormalizer.normalize(config.searchRelayUrl)
-    log.info("graph-streamer: relay={} store={} dryRun={}", relay.url, config.storePath, config.dryRun)
+    log.info("graph-streamer: relay={} dryRun={}", relay.url, config.dryRun)
 
-    // The store's own relay URL scopes NIP-62: a vanish request naming the search relay, or
-    // ALL_RELAYS, is applied; one naming any other relay is kept and does nothing.
-    val store = EventStore(dbName = config.storePath, relay = relay, indexStrategy = GraphIndexing())
     val redis = JedisPool(config.redisHost, config.redisPort)
     val state = RedisStreamerState(redis)
     val http =
@@ -63,28 +59,22 @@ private suspend fun run(config: Config) {
     val client = NostrClient(BasicOkHttpWebSocket.Builder { http })
 
     Neo4jRedisGraph(config.neo4jUrl, config.neo4jUsername, config.neo4jPassword, redis).use { graph ->
-        val mirror = Mirror(store, state)
-        val projector = Projector(mirror, state, graph, config.dryRun, config.projectBatch)
-        val live = LiveStream(client, relay, mirror, config.liveRefreshSeconds, config.liveOverlapSeconds)
-        val audit = Audit(client, relay, mirror, config.auditWindow, config.auditMaxDeletes)
+        // A dry run changes nothing in the shared Neo4j, schema included; it never reads these.
+        if (!config.dryRun) graph.ensureIndexes()
+
+        val projector = Projector(graph, SearchRelayReader(client, relay), state, config.dryRun, config.projectBatch)
+        val live = LiveStream(client, relay, projector, config.liveRefreshSeconds, config.liveOverlapSeconds)
+        val audit = Audit(client, relay, graph, projector, state, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes))
 
         try {
             coroutineScope {
                 launch { live.run() }
-                launch { projectForever(projector) }
+                launch { recomputeForever(projector) }
                 if (config.auditEveryHours > 0) launch { auditForever(audit, state, config.auditEveryHours * 3600) }
                 launch {
                     while (isActive) {
                         delay(STATS_EVERY_MS)
-                        log.info(
-                            "stats: mirror accepted={} rejected={} duplicates={} removed={} dirty={} projected {}",
-                            mirror.accepted.get(),
-                            mirror.rejected.get(),
-                            mirror.duplicates.get(),
-                            mirror.removed.get(),
-                            state.dirtyCount(),
-                            projector.stats(),
-                        )
+                        log.info("stats: dirty={} {}", state.dirtyCount(), projector.stats())
                     }
                 }
             }
@@ -95,19 +85,19 @@ private suspend fun run(config: Config) {
     }
 }
 
-private suspend fun projectForever(projector: Projector) {
+private suspend fun recomputeForever(projector: Projector) {
     var failures = 0
     while (true) {
         try {
-            if (projector.projectOnce() == 0) delay(IDLE_MS)
+            if (projector.recomputeOnce() == 0) delay(IDLE_MS)
             failures = 0
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // The batch stays dirty and is retried; a graph that stays down stops the process.
+            // The batch stays dirty and is retried; a relay or graph that stays down stops the process.
             failures++
-            log.error("projection failed ({} in a row)", failures, e)
-            if (failures >= MAX_PROJECTION_FAILURES) throw e
+            log.error("recompute failed ({} in a row)", failures, e)
+            if (failures >= MAX_FAILURES) throw e
             delay(minOf(60_000L, 1_000L shl minOf(failures, 6)))
         }
     }
@@ -132,7 +122,7 @@ private suspend fun auditForever(
                 fields["${r.name}.need"] = r.need.toString()
                 fields["${r.name}.have"] = r.have.toString()
                 fields["${r.name}.downloaded"] = r.downloaded.toString()
-                fields["${r.name}.deleted"] = r.deleted.toString()
+                fields["${r.name}.recomputed"] = r.recomputed.toString()
                 fields["${r.name}.complete"] = r.complete.toString()
                 fields["${r.name}.note"] = r.note ?: ""
             }
@@ -148,4 +138,4 @@ private suspend fun auditForever(
 
 private const val IDLE_MS = 1_000L
 private const val STATS_EVERY_MS = 60_000L
-private const val MAX_PROJECTION_FAILURES = 20
+private const val MAX_FAILURES = 20

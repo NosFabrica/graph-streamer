@@ -1,187 +1,175 @@
 package com.nosfabrica.graphstreamer
 
-import com.nosfabrica.graphstreamer.mirror.GraphIndexing
-import com.nosfabrica.graphstreamer.mirror.Mirror
 import com.nosfabrica.graphstreamer.projection.Edge
+import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.projection.Projector
+import com.nosfabrica.graphstreamer.store.IncompleteRead
 import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
-import com.vitorpamplona.quartz.nip01Core.store.sqlite.EventStore
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * The store applies the deletions; the projector only reads what survives. These run the real
- * Quartz SQLite store (in memory) under the mirror and check the edges that come out.
+ * Lists and reports apply as they arrive; anything that takes something away (a kind 5, a kind
+ * 62, an audit's absence) recomputes the author from the relay, which has already applied it.
+ * The fake relay here holds what the real one would serve after doing so.
  */
 class ProjectionTest {
-    private val searchRelay = RelayUrlNormalizer.normalize("wss://search.brainstorm.world")
-    private val store = EventStore(dbName = null, relay = searchRelay, indexStrategy = GraphIndexing())
     private val state = FakeState()
     private val graph = FakeGraph()
-    private val mirror = Mirror(store, state)
+    private val relay = FakeRelay()
     private var now = System.currentTimeMillis() / 1000
 
-    private fun projector(dryRun: Boolean = false) = Projector(mirror, state, graph, dryRun, batchSize = 100, clock = { now })
-
-    private suspend fun ingestAndProject(vararg events: Event) {
-        mirror.ingest(events.toList())
-        while (projector().projectOnce() > 0) Unit
-    }
+    private fun projector(dryRun: Boolean = false) = Projector(graph, relay, state, dryRun, batchSize = 100, clock = { now })
 
     private val alice = Signer()
     private val t0 = now - 1000
 
+    /** The relay stores [events] and streams them to us. */
+    private suspend fun arrive(vararg events: Event) {
+        relay.events += events
+        projector().apply(events.toList())
+    }
+
+    private suspend fun recomputeAll() {
+        while (projector().recomputeOnce() > 0) Unit
+    }
+
     @Test
-    fun aFollowListBecomesEdges() =
+    fun aFollowListBecomesEdgesAndIsRecorded() =
         runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0))
-            assertEquals(setOf(hex(1), hex(2)), graph.of(alice.pubkey, Edge.FOLLOWS))
+            val list = alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0)
+            arrive(list)
+            assertEquals(setOf(hex(1), hex(2)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+            assertEquals(list.id, graph.authors[alice.pubkey]?.heads?.get(ListKind.FOLLOWS)?.id)
+            assertEquals(0, relay.reads)
+        }
+
+    @Test
+    fun aNewerListReplacesTheOldOneAndAnOlderOneChangesNothing() =
+        runTest {
+            arrive(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0 + 10))
+            arrive(alice.event(3, listOf(listOf("p", hex(9))), createdAt = t0))
+            assertEquals(setOf(hex(1), hex(2)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+            arrive(alice.event(3, listOf(listOf("p", hex(2)), listOf("p", hex(3))), createdAt = t0 + 20))
+            assertEquals(setOf(hex(2), hex(3)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+        }
+
+    @Test
+    fun aDeletedFollowListLeavesTheGraphOnRecompute() =
+        runTest {
+            val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
+            arrive(list)
+            // The relay applies the kind 5 (drops the list), then streams the kind 5.
+            relay.events.remove(list)
+            arrive(alice.event(5, listOf(listOf("a", "3:${alice.pubkey}:"), listOf("k", "3")), createdAt = t0 + 10))
+            assertTrue(alice.pubkey in state.dirty)
+            assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+
+            recomputeAll()
+            assertTrue(graph.edges(alice.pubkey, Edge.FOLLOWS).isEmpty())
+            assertEquals(null, graph.authors[alice.pubkey]?.heads?.get(ListKind.FOLLOWS))
             assertTrue(state.dirty.isEmpty())
         }
 
     @Test
-    fun aNewerListReplacesTheOldOne() =
-        runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0))
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(2)), listOf("p", hex(3))), createdAt = t0 + 10))
-            assertEquals(setOf(hex(2), hex(3)), graph.of(alice.pubkey, Edge.FOLLOWS))
-        }
-
-    @Test
-    fun anOlderListArrivingLateChangesNothing() =
-        runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(2))), createdAt = t0 + 10))
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0))
-            assertEquals(setOf(hex(2)), graph.of(alice.pubkey, Edge.FOLLOWS))
-        }
-
-    @Test
-    fun aKind5ByAddressClearsTheFollowList() =
-        runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0))
-            ingestAndProject(alice.event(5, listOf(listOf("a", "3:${alice.pubkey}:"), listOf("k", "3")), createdAt = t0 + 10))
-            assertTrue(graph.of(alice.pubkey, Edge.FOLLOWS).isEmpty())
-        }
-
-    @Test
-    fun aKind5ByIdRetractsAReport() =
+    fun aRetractedReportLeavesOnlyItsOwnTargets() =
         runTest {
             val report = alice.event(1984, listOf(listOf("p", hex(7), "spam")), createdAt = t0)
             val other = alice.event(1984, listOf(listOf("p", hex(8), "spam")), createdAt = t0)
-            ingestAndProject(report, other)
-            assertEquals(setOf(hex(7), hex(8)), graph.of(alice.pubkey, Edge.REPORTS))
+            arrive(report, other)
+            assertEquals(setOf(hex(7), hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
 
-            ingestAndProject(alice.event(5, listOf(listOf("e", report.id), listOf("k", "1984")), createdAt = t0 + 10))
-            assertEquals(setOf(hex(8)), graph.of(alice.pubkey, Edge.REPORTS))
+            relay.events.remove(report)
+            arrive(alice.event(5, listOf(listOf("e", report.id), listOf("k", "1984")), createdAt = t0 + 10))
+            recomputeAll()
+            assertEquals(setOf(hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
+            assertEquals(setOf(other.id), graph.authors[alice.pubkey]?.reports?.keys)
         }
 
     @Test
-    fun someoneElsesKind5DeletesNothing() =
+    fun aVanishClearsEverythingOnRecompute() =
         runTest {
-            val report = alice.event(1984, listOf(listOf("p", hex(7))), createdAt = t0)
-            ingestAndProject(report)
-            ingestAndProject(Signer().event(5, listOf(listOf("e", report.id), listOf("k", "1984")), createdAt = t0 + 10))
-            assertEquals(setOf(hex(7)), graph.of(alice.pubkey, Edge.REPORTS))
+            val events =
+                arrayOf(
+                    alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0),
+                    alice.event(10000, listOf(listOf("p", hex(2))), createdAt = t0),
+                    alice.event(1984, listOf(listOf("p", hex(3))), createdAt = t0),
+                    alice.event(10040, listOf(listOf("30382:rank", hex(4), "wss://nip85")), createdAt = t0),
+                )
+            arrive(*events)
+            assertEquals(setOf(hex(4)), graph.edges(alice.pubkey, Edge.DESIGNATES))
+
+            relay.events.removeAll(events.toSet())
+            arrive(alice.event(62, listOf(listOf("relay", "ALL_RELAYS")), createdAt = t0 + 10))
+            recomputeAll()
+            for (edge in Edge.entries) assertTrue(graph.edges(alice.pubkey, edge).isEmpty(), "$edge left behind")
+            assertTrue(graph.authors[alice.pubkey]!!.heads.isEmpty())
+            assertTrue(graph.authors[alice.pubkey]!!.reports.isEmpty())
         }
 
     @Test
-    fun aVanishNamingTheSearchRelayClearsEverything() =
+    fun aRecomputeThatCannotFinishWritesNothingAndKeepsTheAuthor() =
         runTest {
-            ingestAndProject(
-                alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0),
-                alice.event(10000, listOf(listOf("p", hex(2))), createdAt = t0),
-                alice.event(1984, listOf(listOf("p", hex(3))), createdAt = t0),
-                alice.event(10040, listOf(listOf("30382:rank", hex(4), "wss://nip85")), createdAt = t0),
-            )
-            assertEquals(setOf(hex(4)), graph.of(alice.pubkey, Edge.DESIGNATES))
-
-            ingestAndProject(alice.event(62, listOf(listOf("relay", searchRelay.url)), createdAt = t0 + 10))
-            for (edge in Edge.entries) assertTrue(graph.of(alice.pubkey, edge).isEmpty(), "$edge left behind")
+            val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
+            arrive(list)
+            relay.events.remove(list)
+            state.markDirty(listOf(alice.pubkey))
+            relay.drains = false
+            assertFailsWith<IncompleteRead> { projector().recomputeOnce() }
+            assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+            assertTrue(alice.pubkey in state.dirty)
         }
 
     @Test
-    fun aVanishFromEverywhereClearsEverything() =
-        runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0))
-            ingestAndProject(alice.event(62, listOf(listOf("relay", "ALL_RELAYS")), createdAt = t0 + 10))
-            assertTrue(graph.of(alice.pubkey, Edge.FOLLOWS).isEmpty())
-        }
-
-    @Test
-    fun aVanishNamingAnotherRelayDoesNothing() =
-        runTest {
-            ingestAndProject(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0))
-            ingestAndProject(alice.event(62, listOf(listOf("relay", "wss://relay.damus.io/")), createdAt = t0 + 10))
-            assertEquals(setOf(hex(1)), graph.of(alice.pubkey, Edge.FOLLOWS))
-        }
-
-    @Test
-    fun anExpiredListIsDroppedWhenItsAuthorIsProjectedAgain() =
+    fun anExpiredListIsDroppedWhenItsAuthorIsRecomputed() =
         runTest {
             val expiresAt = now + 100
-            ingestAndProject(alice.event(10000, listOf(listOf("p", hex(1)), listOf("expiration", expiresAt.toString())), createdAt = t0))
-            assertEquals(setOf(hex(1)), graph.of(alice.pubkey, Edge.MUTES))
+            arrive(alice.event(10000, listOf(listOf("p", hex(1)), listOf("expiration", expiresAt.toString())), createdAt = t0))
+            assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.MUTES))
 
             now = expiresAt
             state.markDirty(listOf(alice.pubkey))
-            while (projector().projectOnce() > 0) Unit
-            assertTrue(graph.of(alice.pubkey, Edge.MUTES).isEmpty())
+            recomputeAll()
+            assertTrue(graph.edges(alice.pubkey, Edge.MUTES).isEmpty())
         }
 
     @Test
-    fun whatTheAuditRemovesLeavesTheGraph() =
+    fun reapplyingAnEventWritesNothing() =
         runTest {
             val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
-            ingestAndProject(list)
-            mirror.remove(listOf(list.id))
-            while (projector().projectOnce() > 0) Unit
-            assertTrue(graph.of(alice.pubkey, Edge.FOLLOWS).isEmpty())
-        }
-
-    @Test
-    fun aDuplicateMarksNobody() =
-        runTest {
-            val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
-            ingestAndProject(list)
-            mirror.ingest(listOf(list))
-            assertTrue(state.dirty.isEmpty())
-            assertEquals(1, mirror.duplicates.get())
+            arrive(list)
+            val writes = graph.writes.size
+            projector().apply(listOf(list))
+            assertEquals(writes, graph.writes.size)
         }
 
     @Test
     fun aDryRunWritesNothingButCountsTheDiff() =
         runTest {
-            mirror.ingest(listOf(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0)))
             val dry = projector(dryRun = true)
-            while (dry.projectOnce() > 0) Unit
-            assertTrue(graph.applied.isEmpty())
+            dry.apply(listOf(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0)))
+            assertTrue(graph.writes.isEmpty())
             assertEquals(2, dry.edgesAdded.getValue(Edge.FOLLOWS).get())
-            assertTrue(state.dirty.isEmpty())
         }
 
     @Test
-    fun aWriteDuringProjectionKeepsTheAuthorDirty() =
+    fun aMarkDuringARecomputeKeepsTheAuthorDirty() =
         runTest {
-            mirror.ingest(listOf(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)))
+            state.markDirty(listOf(alice.pubkey))
             val read = state.dirty(10)
-            state.markDirty(listOf(alice.pubkey)) // a write landing after the projector read
+            state.markDirty(listOf(alice.pubkey)) // a kind 5 landing after the recompute read
             assertEquals(0, state.clearDirty(read))
             assertTrue(alice.pubkey in state.dirty)
         }
 
     @Test
-    fun theMirrorKeepsOnlyWhatItsFiltersAskFor() =
+    fun deletionsAndVanishesAreTriggersNotEdges() =
         runTest {
-            mirror.ingest(
-                listOf(
-                    alice.event(1, content = "a note", createdAt = t0),
-                    alice.event(5, listOf(listOf("e", hex(1)), listOf("k", "1")), createdAt = t0),
-                    alice.event(5, listOf(listOf("e", hex(2)), listOf("k", "1984")), createdAt = t0),
-                ),
-            )
-            assertEquals(1, mirror.accepted.get())
+            projector().apply(listOf(alice.event(5, listOf(listOf("e", hex(1)), listOf("k", "1984")), createdAt = t0)))
+            assertTrue(graph.writes.isEmpty())
+            assertEquals(setOf(alice.pubkey), state.dirty.keys)
         }
 }

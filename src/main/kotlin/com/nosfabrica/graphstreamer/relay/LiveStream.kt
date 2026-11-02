@@ -1,11 +1,13 @@
-package com.nosfabrica.graphstreamer.mirror
+package com.nosfabrica.graphstreamer.relay
 
-import com.nosfabrica.graphstreamer.Mirrored
+import com.nosfabrica.graphstreamer.RelayFilters
+import com.nosfabrica.graphstreamer.projection.Projector
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.reqs.SubscriptionListener
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -14,19 +16,19 @@ import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 
 /**
- * One long-lived REQ on the search relay for the mirrored filters. The relay fans its sync's
- * writes out to live subscribers like any other publish, so this sees each new list, report,
- * deletion and vanish as the relay stores it.
+ * One long-lived REQ on the search relay ([RelayFilters.live]). The relay fans its sync's writes
+ * out to live subscribers like any other publish, so this sees each new list, report, deletion
+ * and vanish as the relay stores it.
  *
  * Quartz re-sends the REQ itself after a reconnect, with the filters it was last given. So the
  * REQ is given a fresh `since` (now minus [overlapSeconds]) every [refreshSeconds]: a reconnect
- * re-reads at most that much, and the mirror drops what it already holds. A gap longer than the
- * overlap, and anything the relay stores late with an old `created_at`, is the audit's job.
+ * re-reads at most that much, and re-applying an event changes nothing. A longer gap, and
+ * anything the relay stores late with an old `created_at`, is the audit's job.
  */
 class LiveStream(
     private val client: INostrClient,
     private val relay: NormalizedRelayUrl,
-    private val mirror: Mirror,
+    private val projector: Projector,
     private val refreshSeconds: Long,
     private val overlapSeconds: Long,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
@@ -71,10 +73,12 @@ class LiveStream(
                     batch.add(inbox.receive())
                     while (batch.size < BATCH) batch.add(inbox.tryReceive().getOrNull() ?: break)
                     try {
-                        mirror.ingest(batch)
+                        projector.apply(batch)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
-                        // The events are lost to this stream, not to the mirror: the audit re-reads them.
-                        log.error("ingest of {} live events failed", batch.size, e)
+                        // Lost to this stream, not to the graph: the next audit downloads them again.
+                        log.error("applying {} live events failed", batch.size, e)
                     }
                     batch.clear()
                 }
@@ -82,8 +86,7 @@ class LiveStream(
 
             try {
                 while (isActive) {
-                    val since = clock() - overlapSeconds
-                    client.subscribe(SUB_ID, mapOf(relay to Mirrored.filters(since = since)), listener)
+                    client.subscribe(SUB_ID, mapOf(relay to RelayFilters.live(since = clock() - overlapSeconds)), listener)
                     delay(refreshSeconds * 1000)
                 }
             } finally {

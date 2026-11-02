@@ -9,27 +9,26 @@ data class Config(
     val redisPort: Int,
     /** Our search relay: it mirrors these kinds from every certified relay and verifies what it stores. */
     val searchRelayUrl: String = "wss://search.brainstorm.world",
-    /** The local SQLite mirror. On a volume: losing it means a full re-download. */
-    val storePath: String = "/data/graph-streamer.db",
     /**
      * True: project and log the diffs against the graph, write nothing to Neo4j or the graph's
      * Redis sets. The default, so a fresh deploy beside the server's consumer can't fight it.
      */
     val dryRun: Boolean = true,
-    /** A negentropy audit of the whole mirrored set this often; 0 turns it off. */
+    /** A negentropy audit of every graph kind against the relay this often; 0 turns it off. */
     val auditEveryHours: Long = 24,
     /** Events per `created_at` window an audit reconciles at once (both sides read windowed). */
     val auditWindow: Int = 50_000,
     /**
-     * An audit deletes the events the relay no longer holds, but not more than this many per
-     * filter in one audit (more is likelier a relay fault than real retractions); 0 = no limit.
+     * An audit recomputes the authors of events the relay no longer holds, but not when more
+     * than this many are absent in one filter (likelier a relay fault than real retractions);
+     * 0 = no limit.
      */
     val auditMaxDeletes: Int = 10_000,
     /** The live REQ asks again this often, with `since` moved up to now minus [liveOverlapSeconds]. */
     val liveRefreshSeconds: Long = 600,
     /** How far back a (re)sent live REQ reaches; covers a reconnect inside one refresh. */
     val liveOverlapSeconds: Long = 1_800,
-    /** Authors re-projected per batch. */
+    /** Authors recomputed from the relay per batch. */
     val projectBatch: Int = 200,
 ) {
     companion object {
@@ -46,7 +45,6 @@ data class Config(
                 redisHost = required("REDIS_HOST"),
                 redisPort = required("REDIS_PORT").toInt(),
                 searchRelayUrl = optional("SEARCH_RELAY_URL") ?: defaults.searchRelayUrl,
-                storePath = optional("STORE_PATH") ?: defaults.storePath,
                 dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,

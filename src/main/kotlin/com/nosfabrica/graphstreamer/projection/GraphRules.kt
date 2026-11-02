@@ -1,13 +1,12 @@
 package com.nosfabrica.graphstreamer.projection
 
-import com.nosfabrica.graphstreamer.Mirrored
+import com.nosfabrica.graphstreamer.RelayFilters
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip40Expiration.expiration
 
 /**
- * The outgoing edges the graph holds per author, and the Redis set each one is copied into.
- * Names are a contract with brainstorm_server and the GrapeRank worker: changing one is a
- * cross-repo change.
+ * The outgoing edges the graph holds per author. Names are a contract with brainstorm_server
+ * and the GrapeRank worker: changing one is a cross-repo change.
  */
 enum class Edge(
     val relType: String,
@@ -26,9 +25,47 @@ enum class Edge(
 }
 
 /**
- * Pure: an author's surviving events in, the edges they should have out. The rules are
- * brainstorm_server's (`process_strfry_event.py`, `report_graph_service.py`,
- * `designation_service.py`), so a cutover changes no edge that the server would have written.
+ * The replaceable lists. Each author has at most one of each; the graph records which event it
+ * is on the author's node (`<prop>_event`, `<prop>_at`), and all of that author's edges of
+ * [edge] come from it.
+ */
+enum class ListKind(
+    val kind: Int,
+    val edge: Edge,
+    val prop: String,
+) {
+    FOLLOWS(3, Edge.FOLLOWS, "follows"),
+    MUTES(10000, Edge.MUTES, "mutes"),
+    DESIGNATIONS(10040, Edge.DESIGNATES, "designations"),
+    ;
+
+    companion object {
+        fun of(kind: Int) = entries.firstOrNull { it.kind == kind }
+    }
+}
+
+/** The event a list's edges came from. */
+data class ListHead(
+    val id: String,
+    val createdAt: Long,
+)
+
+/**
+ * Everything the graph holds for one author: their edges, the list events those came from, and
+ * every report event of theirs (note reports too, which make no edge: the audit compares ids).
+ */
+data class AuthorState(
+    val edges: Map<Edge, Set<String>> = emptyMap(),
+    val heads: Map<ListKind, ListHead> = emptyMap(),
+    /** Report event id → created_at. */
+    val reports: Map<String, Long> = emptyMap(),
+) {
+    fun edges(edge: Edge): Set<String> = edges[edge].orEmpty()
+}
+
+/**
+ * Pure: events in, an author's state out. The parsing rules are brainstorm_server's
+ * (`process_strfry_event.py`, `report_graph_service.py`, `designation_service.py`).
  */
 object GraphRules {
     private val HEX64 = Regex("^[0-9a-f]{64}$")
@@ -63,31 +100,71 @@ object GraphRules {
         return seen.toList()
     }
 
-    /** NIP-40: an event whose `expiration` is at or before [now] is gone, swept or not. */
+    fun listTargets(
+        kind: ListKind,
+        event: Event,
+    ): Set<String> =
+        when (kind) {
+            ListKind.FOLLOWS, ListKind.MUTES -> pTagPubkeys(event.tags).toSet()
+            ListKind.DESIGNATIONS -> designatedPubkeys(event.tags, event.pubKey).toSet()
+        }
+
+    /** NIP-40: an event whose `expiration` is at or before [now] is gone. */
     fun isExpired(
         event: Event,
         now: Long,
     ): Boolean = event.expiration()?.let { it <= now } ?: false
 
+    /** NIP-01: the newer list wins; on the same second, the lower id. */
+    fun isNewer(
+        event: Event,
+        head: ListHead?,
+    ): Boolean = head == null || event.createdAt > head.createdAt || (event.createdAt == head.createdAt && event.id < head.id)
+
     /**
-     * The edges [author] should have, from the events the mirror still holds for them. Deleted,
-     * vanished and superseded events are already gone from the store; expired ones may not be
-     * swept yet, so they are dropped here. No event of a kind means no edges of that kind.
+     * [current] after [events] arrive: a list replaces the one held only if it is newer, and a
+     * report adds its targets. Nothing is taken away here: a deletion reaches the graph as a
+     * recompute ([fromRelay]), never as an event to apply.
      */
-    fun desired(
+    fun apply(
+        author: String,
+        current: AuthorState,
+        events: List<Event>,
+        now: Long,
+    ): AuthorState {
+        val live = events.filter { it.pubKey == author && !isExpired(it, now) }
+        val edges = current.edges.toMutableMap()
+        val heads = current.heads.toMutableMap()
+        val reports = current.reports.toMutableMap()
+
+        for (kind in ListKind.entries) {
+            val newest = live.filter { it.kind == kind.kind }.maxWithOrNull(compareBy<Event> { it.createdAt }.thenByDescending { it.id }) ?: continue
+            if (isNewer(newest, heads[kind])) {
+                heads[kind] = ListHead(newest.id, newest.createdAt)
+                edges[kind.edge] = listTargets(kind, newest)
+            }
+        }
+
+        val newReports = live.filter { it.kind == RelayFilters.REPORTS && it.id !in reports }
+        if (newReports.isNotEmpty()) {
+            val targets = current.edges(Edge.REPORTS).toMutableSet()
+            for (report in newReports) {
+                reports[report.id] = report.createdAt
+                targets += reportTargets(report)
+            }
+            edges[Edge.REPORTS] = targets
+        }
+
+        return AuthorState(edges, heads, reports)
+    }
+
+    /**
+     * What [author] should have, given everything the relay holds for them now. The relay has
+     * already applied deletions, vanishes and expiries, so what it serves is what survives.
+     */
+    fun fromRelay(
         author: String,
         events: List<Event>,
         now: Long,
-    ): Map<Edge, Set<String>> {
-        val live = events.filter { it.pubKey == author && !isExpired(it, now) }
-
-        fun newest(kind: Int) = live.filter { it.kind == kind }.maxWithOrNull(compareBy<Event> { it.createdAt }.thenByDescending { it.id })
-
-        return mapOf(
-            Edge.FOLLOWS to newest(Mirrored.FOLLOWS)?.let { pTagPubkeys(it.tags).toSet() }.orEmpty(),
-            Edge.MUTES to newest(Mirrored.MUTES)?.let { pTagPubkeys(it.tags).toSet() }.orEmpty(),
-            Edge.DESIGNATES to newest(Mirrored.DESIGNATIONS)?.let { designatedPubkeys(it.tags, author).toSet() }.orEmpty(),
-            Edge.REPORTS to live.filter { it.kind == Mirrored.REPORTS }.flatMapTo(LinkedHashSet()) { reportTargets(it) },
-        )
-    }
+    ): AuthorState = apply(author, AuthorState(), events, now)
 }

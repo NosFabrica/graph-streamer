@@ -19,6 +19,5 @@ WORKDIR /app
 
 COPY --from=builder /app/build/install/graph-streamer ./
 
-# Long-running: one replica, its SQLite mirror on a volume at /data (STORE_PATH).
-VOLUME ["/data"]
+# Long-running and stateless: one replica (one writer to the graph). Its state is in Neo4j and Redis.
 ENTRYPOINT ["/app/bin/graph-streamer"]

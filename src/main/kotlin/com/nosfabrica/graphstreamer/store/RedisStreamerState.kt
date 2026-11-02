@@ -3,8 +3,8 @@ package com.nosfabrica.graphstreamer.store
 import redis.clients.jedis.JedisPool
 
 /**
- * Keys (all this service's own; the graph's sets are written by [RedisGraphSets]):
- * - `graph_streamer:dirty` — HASH author → generation: authors waiting to be projected.
+ * Keys (all this service's own; the graph's sets are written by [Neo4jRedisGraph]):
+ * - `graph_streamer:dirty` — HASH author → generation: authors waiting to be recomputed from the relay.
  * - `graph_streamer:audit` — HASH: the last negentropy audit's counters.
  */
 class RedisStreamerState(
