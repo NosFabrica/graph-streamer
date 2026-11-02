@@ -1,0 +1,68 @@
+package com.nosfabrica.graphstreamer
+
+/** Everything the service reads from the environment. Graph and Redis names match the GrapeRank worker's. */
+data class Config(
+    val neo4jUrl: String,
+    val neo4jUsername: String,
+    val neo4jPassword: String,
+    val redisHost: String,
+    val redisPort: Int,
+    /** Our search relay: it mirrors these kinds from every certified relay and verifies what it stores. */
+    val searchRelayUrl: String = "wss://search.brainstorm.world",
+    /** The local SQLite mirror. On a volume: losing it means a full re-download. */
+    val storePath: String = "/data/graph-streamer.db",
+    /**
+     * True: project and log the diffs against the graph, write nothing to Neo4j or the graph's
+     * Redis sets. The default, so a fresh deploy beside the server's consumer can't fight it.
+     */
+    val dryRun: Boolean = true,
+    /** A negentropy audit of the whole mirrored set this often; 0 turns it off. */
+    val auditEveryHours: Long = 24,
+    /** Events per `created_at` window an audit reconciles at once (both sides read windowed). */
+    val auditWindow: Int = 50_000,
+    /**
+     * An audit deletes the events the relay no longer holds, but not more than this many per
+     * filter in one audit (more is likelier a relay fault than real retractions); 0 = no limit.
+     */
+    val auditMaxDeletes: Int = 10_000,
+    /** The live REQ asks again this often, with `since` moved up to now minus [liveOverlapSeconds]. */
+    val liveRefreshSeconds: Long = 600,
+    /** How far back a (re)sent live REQ reaches; covers a reconnect inside one refresh. */
+    val liveOverlapSeconds: Long = 1_800,
+    /** Authors re-projected per batch. */
+    val projectBatch: Int = 200,
+) {
+    companion object {
+        fun fromEnv(env: Map<String, String> = System.getenv()): Config {
+            fun required(name: String) = env[name]?.takeIf { it.isNotBlank() } ?: error("$name is not set")
+
+            fun optional(name: String) = env[name]?.takeIf { it.isNotBlank() }
+
+            val defaults = Config("", "", "", "", 0)
+            return Config(
+                neo4jUrl = required("NEO4J_URL"),
+                neo4jUsername = required("NEO4J_USERNAME"),
+                neo4jPassword = required("NEO4J_PASSWORD"),
+                redisHost = required("REDIS_HOST"),
+                redisPort = required("REDIS_PORT").toInt(),
+                searchRelayUrl = optional("SEARCH_RELAY_URL") ?: defaults.searchRelayUrl,
+                storePath = optional("STORE_PATH") ?: defaults.storePath,
+                dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
+                auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
+                auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
+                auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,
+                liveRefreshSeconds = optional("LIVE_REFRESH_SECONDS")?.toLong() ?: defaults.liveRefreshSeconds,
+                liveOverlapSeconds = optional("LIVE_OVERLAP_SECONDS")?.toLong() ?: defaults.liveOverlapSeconds,
+                projectBatch = optional("PROJECT_BATCH")?.toInt() ?: defaults.projectBatch,
+            )
+        }
+
+        /** A typo must not silently mean "write to the graph": anything unrecognised stops the boot. */
+        fun parseSwitch(value: String): Boolean =
+            when (value.trim().lowercase()) {
+                "true", "1", "yes", "on" -> true
+                "false", "0", "no", "off" -> false
+                else -> error("not a switch: '$value' (true/false)")
+            }
+    }
+}
