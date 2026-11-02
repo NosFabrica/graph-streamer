@@ -19,16 +19,17 @@ object RelayFilters {
     const val UNRANKED = "include:spam"
 
     /**
-     * The live REQ. Lists and reports are applied as they arrive. Kind 5 and kind 62 are only
-     * triggers: the relay has already applied them, so their author is recomputed from it. Only
+     * The live REQ, without `since`: the live stream sets it. Lists and reports are applied as
+     * they arrive. Kind 5 and kind 62 are only triggers: the relay has already applied them, so
+     * their author is recomputed from it. Only
      * kind-5s whose `k` names one of our kinds are asked for; any other deletion of ours shows up
      * at the next audit, when the relay no longer holds what it deleted.
      */
-    fun live(since: Long): List<Filter> =
+    fun live(): List<Filter> =
         listOf(
-            Filter(kinds = GRAPH_KINDS, since = since, search = UNRANKED),
-            Filter(kinds = listOf(DELETION), tags = mapOf("k" to GRAPH_KINDS.map { it.toString() }), since = since, search = UNRANKED),
-            Filter(kinds = listOf(VANISH), since = since, search = UNRANKED),
+            Filter(kinds = GRAPH_KINDS, search = UNRANKED),
+            Filter(kinds = listOf(DELETION), tags = mapOf("k" to GRAPH_KINDS.map { it.toString() }), search = UNRANKED),
+            Filter(kinds = listOf(VANISH), search = UNRANKED),
         )
 
     /** One audit filter per kind, so each is compared against its own bookkeeping in the graph. */

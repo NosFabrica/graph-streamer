@@ -26,8 +26,12 @@ search relay ◀──── daily negentropy audit ───────┘  (n
 
 1. **Live stream.** One long-lived REQ on the search relay. The relay fans its sync's writes out
    to live subscribers, so each new list, report, deletion and vanish arrives as the relay stores
-   it. The REQ is re-sent every `LIVE_REFRESH_SECONDS` with `since` = now − `LIVE_OVERLAP_SECONDS`, so a
-   reconnect (Quartz re-sends the REQ) re-reads at most that much. Re-applying an event writes nothing.
+   it. Quartz reconnects on its own, with backoff, and re-sends the REQ. Its `since` moves forward
+   only while the subscription is known to be caught up (at EOSE, and at each live event), minus
+   `LIVE_OVERLAP_SECONDS`. So after an outage of any length the REQ asks from just before it began.
+   A `since`-only change sends no new REQ. Re-applying an event writes nothing.
+   Any CLOSED but a rate limit with a stated back-off stops the process: after a CLOSED, Quartz
+   doesn't re-send the REQ on its own, and a silent subscription would be worse than a restart.
 2. **Apply.** A list (kind 3, 10000 or 10040) replaces the one the author's node records only
    if it is newer: later `created_at`, or the lower id on the same second. Its edges are diffed
    in, and its id and `created_at` are recorded. A report adds its targets and records its id.
@@ -142,8 +146,8 @@ the one the recomputer read. A crash, or a kind 5 that arrives mid-recompute, le
 | `AUDIT_EVERY_HOURS` | `24` | `0` turns the audit off |
 | `AUDIT_WINDOW` | `50000` | lists per reconcile window |
 | `AUDIT_MAX_DELETES` | `10000` | absent events per kind per audit; `0` = no limit |
-| `LIVE_REFRESH_SECONDS` | `600` | |
-| `LIVE_OVERLAP_SECONDS` | `1800` | |
+| `LIVE_SINCE_UPDATE_SECONDS` | `60` | how often the stored `since` may move forward |
+| `LIVE_OVERLAP_SECONDS` | `600` | how far before the last caught-up moment a reconnect asks from |
 | `PROJECT_BATCH` | `200` | authors per recompute (one relay read) |
 
 It is stateless and runs as one replica, because it must be the only writer of these edges. It
