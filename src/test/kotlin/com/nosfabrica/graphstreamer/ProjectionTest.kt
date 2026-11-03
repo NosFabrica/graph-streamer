@@ -12,8 +12,9 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * Lists and reports apply as they arrive; anything that takes something away (a kind 5, a kind
- * 62, an audit's absence) recomputes the author from the relay, which has already applied it.
+ * Lists and reports apply as they arrive. Anything that takes something away (a kind 5, a kind
+ * 62, an expiry) reaches the graph when an audit finds the relay no longer holds the event and
+ * marks its author, who is recomputed from the relay, which has already applied it.
  * The fake relay here holds what the real one would serve after doing so.
  */
 class ProjectionTest {
@@ -62,10 +63,9 @@ class ProjectionTest {
         runTest {
             val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
             arrive(list)
-            // The relay applies the kind 5 (drops the list), then streams the kind 5.
+            // The relay applies a kind 5 (drops the list); the next audit finds it gone.
             relay.events.remove(list)
-            arrive(alice.event(5, listOf(listOf("a", "3:${alice.pubkey}:"), listOf("k", "3")), createdAt = t0 + 10))
-            assertTrue(alice.pubkey in state.dirty)
+            state.markDirty(listOf(alice.pubkey))
             assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
 
             recomputeAll()
@@ -83,7 +83,7 @@ class ProjectionTest {
             assertEquals(setOf(hex(7), hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
 
             relay.events.remove(report)
-            arrive(alice.event(5, listOf(listOf("e", report.id), listOf("k", "1984")), createdAt = t0 + 10))
+            state.markDirty(listOf(alice.pubkey)) // the audit finds the report gone
             recomputeAll()
             assertEquals(setOf(hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
             assertEquals(setOf(other.id), graph.authors[alice.pubkey]?.reports?.keys)
@@ -102,8 +102,8 @@ class ProjectionTest {
             arrive(*events)
             assertEquals(setOf(hex(4)), graph.edges(alice.pubkey, Edge.DESIGNATES))
 
-            relay.events.removeAll(events.toSet())
-            arrive(alice.event(62, listOf(listOf("relay", "ALL_RELAYS")), createdAt = t0 + 10))
+            relay.events.removeAll(events.toSet()) // the relay applies a kind 62
+            state.markDirty(listOf(alice.pubkey)) // and the audit finds them all gone
             recomputeAll()
             for (edge in Edge.entries) assertTrue(graph.edges(alice.pubkey, edge).isEmpty(), "$edge left behind")
             assertTrue(graph.authors[alice.pubkey]!!.heads.isEmpty())
@@ -160,16 +160,21 @@ class ProjectionTest {
         runTest {
             state.markDirty(listOf(alice.pubkey))
             val read = state.dirty(10)
-            state.markDirty(listOf(alice.pubkey)) // a kind 5 landing after the recompute read
+            state.markDirty(listOf(alice.pubkey)) // another audit's mark, after the recompute read
             assertEquals(0, state.clearDirty(read))
             assertTrue(alice.pubkey in state.dirty)
         }
 
     @Test
-    fun deletionsAndVanishesAreTriggersNotEdges() =
+    fun aDeletionOrVanishHandedToApplyChangesNothing() =
         runTest {
-            projector().apply(listOf(alice.event(5, listOf(listOf("e", hex(1)), listOf("k", "1984")), createdAt = t0)))
+            projector().apply(
+                listOf(
+                    alice.event(5, listOf(listOf("e", hex(1)), listOf("k", "1984")), createdAt = t0),
+                    alice.event(62, listOf(listOf("relay", "ALL_RELAYS")), createdAt = t0),
+                ),
+            )
             assertTrue(graph.writes.isEmpty())
-            assertEquals(setOf(alice.pubkey), state.dirty.keys)
+            assertTrue(state.dirty.isEmpty(), "only the audit marks authors")
         }
 }

@@ -143,7 +143,7 @@ class SearchRelayLiveProbeTest {
                 val search = if (target == relay) RelayFilters.UNRANKED else null
                 val counts = linkedMapOf<Int, Int>()
                 val ages = mutableListOf<String>()
-                for (kind in RelayFilters.GRAPH_KINDS + RelayFilters.VANISH) {
+                for (kind in RelayFilters.GRAPH_KINDS) {
                     var n = 0
                     val result =
                         base.fetchAllPages(target, listOf(Filter(kinds = listOf(kind), since = since, search = search)), idleTimeoutMs = 20_000) {

@@ -15,8 +15,8 @@ data class DirtyAuthor(
 /**
  * The service's own small state: Redis in production.
  *
- * The dirty set holds authors to recompute from the relay: someone whose kind 5 or kind 62
- * arrived, or whose events an audit found the relay no longer holds. A mark is cleared only
+ * The dirty set holds authors to recompute from the relay: those whose events an audit found the
+ * relay no longer holds. A mark is cleared only
  * after the author is written, and only if nobody marked them again meanwhile (the generation
  * still matches), so a crash or a mark during a recompute leaves them marked.
  */

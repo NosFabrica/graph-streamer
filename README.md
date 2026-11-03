@@ -17,16 +17,18 @@ node, which events its edges came from, and that is what the audit compares with
 ## How it works
 
 ```
-                 ┌─ list / report ──────────▶ apply (newer list replaces; report adds)  ─┐
-search relay ────┤                                                                       ├─▶ Neo4j + Redis
-  (live REQ)     └─ kind 5 / kind 62 ─▶ mark author dirty ─▶ recompute from the relay  ─┘
-                                                 ▲
-search relay ◀──── daily negentropy audit ───────┘  (need: download + apply; have: mark dirty)
+search relay ──── list / report ──────▶ apply (newer list replaces; report adds) ─┐
+  (live REQ)                                                                      ├─▶ Neo4j + Redis
+                          mark author dirty ─▶ recompute from the relay ─────────┘
+                                 ▲
+search relay ◀──── daily negentropy audit (need: download + apply; have: mark dirty)
 ```
 
 1. **Live stream.** One long-lived REQ on the search relay. The relay fans its sync's writes out
-   to live subscribers, so each new list, report, deletion and vanish arrives as the relay stores
-   it. It is Quartz's `subscribeEvents` (2.14+). Quartz reconnects on its own, with backoff, and
+   to live subscribers, so each new list and report arrives as the relay stores it. Deletions
+   (kind 5) and vanishes (kind 62) aren't streamed: most clients leave the `k` tag off a kind 5,
+   so a filter for deletions of graph kinds would miss most of them, and streaming every kind 5
+   would be far more to download. The audit catches them. It is Quartz's `subscribeEvents` (2.14+). Quartz reconnects on its own, with backoff, and
    re-sends the REQ with its `since` moved to the newest `created_at` the stream was handed
    (stored events counted at EOSE, capped at the machine's clock), minus `LIVE_OVERLAP_SECONDS`
    (default 0). So after an outage of any length the REQ asks from where it began. The resume
@@ -43,9 +45,9 @@ search relay ◀──── daily negentropy audit ───────┘  (n
    if it is newer: later `created_at`, or the lower id on the same second. Its edges are diffed
    in, and its id and `created_at` are recorded. A report adds its targets and records its id.
    Nothing is ever *removed* by applying an event.
-3. **Recompute.** A kind 5 or kind 62 is only a trigger: the relay has already applied it. Its
-   author is marked dirty, and the recomputer rebuilds dirty authors from everything the relay
-   holds for them now (batched, `PROJECT_BATCH` per read), diffing against the graph. This is the
+3. **Recompute.** When the audit finds the relay no longer holds an event the graph was built
+   from, the relay has already applied whatever removed it. Its author is marked dirty, and the
+   recomputer rebuilds dirty authors from everything the relay holds for them now (batched, `PROJECT_BATCH` per read), diffing against the graph. This is the
    only way edges leave the graph. A relay read that doesn't finish changes nothing, and the author
    stays dirty.
 4. **Audit.** Every `AUDIT_EVERY_HOURS`, each kind is reconciled with the relay over NIP-77.
@@ -53,7 +55,7 @@ search relay ◀──── daily negentropy audit ───────┘  (n
    - *need* (the relay has it, the graph doesn't): downloaded and applied. This covers late
      arrivals, missed live events and, on the first run, the whole past.
    - *have* (the graph has it, the relay doesn't): the author is marked dirty and recomputed, for
-     whatever reason the relay dropped it: a kind 5 without a `k` tag, an expiry, a vanish, a ban.
+     whatever reason the relay dropped it: a deletion, a vanish, an expiry, a ban.
      The search relay is the source of truth, the same way vespa-relay's `deleteMissing` treats a
      provider's relay.
 
@@ -73,19 +75,15 @@ An audit marks the authors of absent events only when:
 
 ### Deletion latency
 
-| cause | takes effect |
-|---|---|
-| kind 5 with a `k` tag naming 3, 1984, 10000 or 10040 | as it streams in (next recompute batch) |
-| kind 62 | as it streams in, as far as the relay applied it (it honours its own URL and `ALL_RELAYS`) |
-| kind 5 without `k`, NIP-40 expiry, anything else the relay drops | next audit |
+Every removal takes effect at the next audit (`AUDIT_EVERY_HOURS`, default 24), as far as the
+relay applied it: a kind 5, a kind 62 (the relay honours its own URL and `ALL_RELAYS`), a NIP-40
+expiry, or anything else the relay drops. A retracted report keeps counting until then.
 
 ## What it reads
 
 | live filter | why |
 |---|---|
 | `{"kinds":[3,10000,10040,1984]}` | follow lists, mute lists, designations, reports |
-| `{"kinds":[5],"#k":["3","10000","10040","1984"]}` | deletions of those: triggers a recompute |
-| `{"kinds":[62]}` | requests to vanish: triggers a recompute |
 
 The audit reconciles one filter per kind (`{"kinds":[3]}`, …). A recompute reads
 `{"authors":[…],"kinds":[3,10000,10040,1984]}`. Every filter carries `search: "include:spam"`,
@@ -136,7 +134,7 @@ The service's own keys:
 | `graph_streamer:audit` | HASH: the last audit's start and finish, and per kind `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
 
 A dirty mark is cleared only after the author is written, and only if its generation is still
-the one the recomputer read. A crash, or a kind 5 that arrives mid-recompute, leaves it marked.
+the one the recomputer read. A crash, or a new mark that arrives mid-recompute, leaves it marked.
 
 ## Running
 

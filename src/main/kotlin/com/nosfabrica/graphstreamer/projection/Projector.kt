@@ -17,9 +17,9 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * - [apply]: lists and reports as they arrive (live, or downloaded by an audit). A list replaces
  *   the one the graph holds only if it is newer; a report adds its targets.
- * - [recomputeOnce]: authors marked dirty (a kind 5 or 62 of theirs arrived, or an audit found
- *   the relay no longer holds an event of theirs) are rebuilt from what the relay holds now.
- *   The relay has already applied the deletion, so this is how anything leaves the graph.
+ * - [recomputeOnce]: authors marked dirty (an audit found the relay no longer holds an event of
+ *   theirs) are rebuilt from what the relay holds now. The relay has already applied the
+ *   deletion, the vanish or the expiry, so this is how anything leaves the graph.
  *
  * Every write is read-compute-write under one lock, so the two never interleave on an author.
  * With [dryRun] the changes are counted and logged, and the graph is not touched.
@@ -42,9 +42,6 @@ class Projector(
     val edgesRemoved = Edge.entries.associateWith { AtomicLong() }
 
     suspend fun apply(events: List<Event>) {
-        val triggers = events.filter { it.kind == RelayFilters.DELETION || it.kind == RelayFilters.VANISH }
-        if (triggers.isNotEmpty()) state.markDirty(triggers.mapTo(HashSet()) { it.pubKey })
-
         val graphEvents = events.filter { it.kind in RelayFilters.GRAPH_KINDS }.distinctBy { it.id }
         if (graphEvents.isEmpty()) return
         val byAuthor = graphEvents.groupBy { it.pubKey }

@@ -20,8 +20,8 @@ import org.slf4j.LoggerFactory
 
 /**
  * The live tail of the search relay ([RelayFilters.live]), applied in batches. The relay fans
- * its sync's writes out to live subscribers like any other publish, so this sees each new list,
- * report, deletion and vanish as the relay stores it.
+ * its sync's writes out to live subscribers like any other publish, so this sees each new list
+ * and report as the relay stores it. Deletions and vanishes are left to the audit.
  *
  * Built on Quartz's `subscribeEvents`:
  * - **Reconnects resume.** The client reconnects on its own, and each time it writes the REQ again
