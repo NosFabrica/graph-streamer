@@ -1,5 +1,6 @@
 package com.nosfabrica.graphstreamer
 
+import com.nosfabrica.graphstreamer.relay.CaughtUpResume
 import com.nosfabrica.graphstreamer.relay.SubscriptionClosedException
 import com.nosfabrica.graphstreamer.relay.subscribeEvents
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -70,7 +71,7 @@ class SearchRelayLiveProbeTest {
             val ids = ConcurrentHashMap.newKeySet<String>()
             val kinds = ConcurrentHashMap<Int, AtomicInteger>()
             val received = AtomicInteger()
-            val resumePoints = CopyOnWriteArrayList<Long>()
+            val resume = CaughtUpResume(overlapSeconds = 600)
 
             val stream =
                 scope.async {
@@ -79,9 +80,7 @@ class SearchRelayLiveProbeTest {
                             .subscribeEvents(
                                 relay = relay,
                                 filters = RelayFilters.live(since = started - 600),
-                                overlapSeconds = 600,
-                                resumePointIntervalMs = 10_000,
-                                onResumePoint = { resumePoints += it },
+                                resume = resume,
                             ).collect { e: Event ->
                                 received.incrementAndGet()
                                 ids += e.id
@@ -90,15 +89,15 @@ class SearchRelayLiveProbeTest {
                     }
                 }
 
-            withTimeout(60_000) { while (resumePoints.isEmpty()) delay(200) }
+            withTimeout(60_000) { while (resume.resumeFrom() == null) delay(200) }
             println("EOSE after ${now() - started}s: ${received.get()} stored events in the last 10 min, by kind ${kinds.mapValues { it.value.get() }}")
 
             delay(60_000)
             val beforeReconnect = received.get()
-            println("after 60s live: ${beforeReconnect - 0} received total, resume points ${resumePoints.map { it - started }}")
+            println("after 60s live: $beforeReconnect received total, resume point ${resume.resumeFrom()?.minus(started)}")
             assertTrue(stream.isActive, "the stream is still open: ${if (stream.isCompleted) stream.await().exceptionOrNull() else ""}")
 
-            val lastPoint = resumePoints.last()
+            val lastPoint = resume.resumeFrom()!!
             base.reconnect(onlyIfChanged = false)
             withTimeout(60_000) { while (subscribes.size < 2) delay(200) }
             println("reconnect rewrote since to ${subscribes[1].map { it?.minus(started) }} (resume point ${lastPoint - started}, relative to start)")
@@ -133,13 +132,19 @@ class SearchRelayLiveProbeTest {
                 val target = RelayUrlNormalizer.normalize(url)
                 val search = if (target == relay) RelayFilters.UNRANKED else null
                 val counts = linkedMapOf<Int, Int>()
-                for (kind in RelayFilters.GRAPH_KINDS) {
+                val ages = mutableListOf<String>()
+                for (kind in RelayFilters.GRAPH_KINDS + RelayFilters.VANISH) {
                     var n = 0
-                    val result = base.fetchAllPages(target, listOf(Filter(kinds = listOf(kind), since = since, search = search)), idleTimeoutMs = 20_000) { n++ }
+                    val result =
+                        base.fetchAllPages(target, listOf(Filter(kinds = listOf(kind), since = since, search = search)), idleTimeoutMs = 20_000) {
+                            n++
+                            if (target == relay) ages += "k$kind ${it.id.take(8)} created ${now() - it.createdAt}s ago"
+                        }
                     counts[kind] = n
                     if (result.end.name != "DRAINED") counts[-kind] = -1
                 }
                 println("last 10 min on $url: ${counts.filterKeys { it > 0 }} ${if (counts.keys.any { it < 0 }) "(some walks did not drain)" else ""}")
+                if (ages.isNotEmpty()) println("  $ages")
             }
         }
         base.close()

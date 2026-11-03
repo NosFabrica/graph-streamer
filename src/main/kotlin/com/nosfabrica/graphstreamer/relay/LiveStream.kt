@@ -9,6 +9,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
@@ -23,10 +24,10 @@ import org.slf4j.LoggerFactory
  *   stream rewrites its `since` to when it was last caught up (EOSE, live events), minus
  *   [overlapSeconds], so the re-sent REQ asks from just before the outage began. Re-applying an
  *   event writes nothing.
- * - **Restarts resume.** Each resume point is saved ([StreamerState.putLiveSince]) and the next
- *   process starts from it. It covers what reached this stream, which can run ahead of what the
- *   projector applied by the inbox's backlog; the overlap covers a backlog shorter than it, and
- *   the audit anything beyond.
+ * - **Restarts resume.** The resume point ([CaughtUpResume.resumeFrom]) is saved every
+ *   [resumePointIntervalMs] ([StreamerState.putLiveSince]) and the next process starts from it.
+ *   It covers what reached this stream, which can run ahead of what the projector applied by the
+ *   inbox's backlog; the overlap covers a backlog shorter than it, and the audit anything beyond.
  * - **A CLOSED ends the stream, and the process.** After a CLOSED the client won't re-send the
  *   REQ on its own, so the subscription would go quiet for good. This client has no NIP-42
  *   responder, so even an `auth-required:` one ends [run] at once; only a rate limit with a
@@ -49,16 +50,26 @@ class LiveStream(
     suspend fun run(): Unit =
         coroutineScope {
             val inbox = Channel<Event>(INBOX)
+            val resume = CaughtUpResume(overlapSeconds, nowInSeconds = clock)
             launch {
                 client
                     .subscribeEvents(
                         relay = relay,
                         filters = RelayFilters.live(since = state.liveSince() ?: (clock() - overlapSeconds)),
-                        overlapSeconds = overlapSeconds,
-                        resumePointIntervalMs = resumePointIntervalMs,
-                        onResumePoint = { state.putLiveSince(it) },
-                        nowInSeconds = clock,
+                        resume = resume,
                     ).collect { inbox.send(it) }
+            }
+            // Saves the resume point for a restart, on this service's own schedule.
+            launch {
+                var saved: Long? = null
+                while (isActive) {
+                    delay(resumePointIntervalMs)
+                    val point = resume.resumeFrom() ?: continue
+                    if (point != saved) {
+                        state.putLiveSince(point)
+                        saved = point
+                    }
+                }
             }
 
             val batch = ArrayList<Event>(BATCH)
