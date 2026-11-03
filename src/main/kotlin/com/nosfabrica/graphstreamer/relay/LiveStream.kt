@@ -27,9 +27,10 @@ import org.slf4j.LoggerFactory
  *   projector applied by the inbox's backlog; the overlap covers a backlog shorter than it, and
  *   the audit anything beyond.
  * - **A CLOSED ends the stream, and the process.** After a CLOSED the client won't re-send the
- *   REQ on its own, so the subscription would go quiet for good. This client signs nothing, so
- *   every CLOSED but a rate limit with a stated back-off ends [run]. Main lets it stop the
- *   process, and Kubernetes restarts it with a fresh client.
+ *   REQ on its own, so the subscription would go quiet for good. This client has no NIP-42
+ *   responder, so even an `auth-required:` one ends [run] at once; only a rate limit with a
+ *   stated back-off, which the client retries, doesn't. Main lets it stop the process, and
+ *   Kubernetes restarts it with a fresh client.
  *
  * What the relay stores late with an old `created_at` never streams; the audit downloads it.
  */
@@ -55,7 +56,6 @@ class LiveStream(
                         since = state.liveSince() ?: (clock() - overlapSeconds),
                         overlapSeconds = overlapSeconds,
                         sinceUpdateIntervalMs = sinceUpdateIntervalMs,
-                        endsOnClosed = { true },
                         onResumePoint = { state.putLiveSince(it) },
                         nowInSeconds = clock,
                     ).collect { inbox.send(it) }
