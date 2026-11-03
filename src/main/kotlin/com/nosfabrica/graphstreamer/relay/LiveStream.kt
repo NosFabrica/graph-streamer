@@ -22,12 +22,12 @@ import org.slf4j.LoggerFactory
  * Built on [subscribeEvents]:
  * - **Reconnects resume.** The client reconnects on its own. When the connection drops, the
  *   stream rewrites its `since` to when it was last caught up (EOSE, live events), minus
- *   [overlapSeconds], so the re-sent REQ asks from just before the outage began. Re-applying an
- *   event writes nothing.
+ *   [overlapSeconds] (default 0), so the re-sent REQ asks from when the outage began. Re-applying
+ *   an event writes nothing.
  * - **Restarts resume.** The resume point ([CaughtUpResume.resumeFrom]) is saved every
  *   [resumePointIntervalMs] ([StreamerState.putLiveSince]) and the next process starts from it.
  *   It covers what reached this stream, which can run ahead of what the projector applied by the
- *   inbox's backlog; the overlap covers a backlog shorter than it, and the audit anything beyond.
+ *   inbox's backlog; an overlap covers a backlog shorter than it, and the audit anything beyond.
  * - **A CLOSED ends the stream, and the process.** After a CLOSED the client doesn't send the REQ
  *   again on the same connection, only on the next reconnect or AUTH (and never once the relay
  *   has refused the same filters three times), so the stream could go quiet for hours. This client has no NIP-42

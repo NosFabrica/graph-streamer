@@ -30,8 +30,11 @@ data class Config(
      * rewrites its own `since` when the connection drops.
      */
     val liveResumePointSeconds: Long = 60,
-    /** How far before the last caught-up moment a reconnect asks from. */
-    val liveOverlapSeconds: Long = 600,
+    /**
+     * How far before the last caught-up moment a reconnect, or a restart, asks from. 0: from that
+     * moment. Events still queued for the graph at a restart are then left to the next audit.
+     */
+    val liveOverlapSeconds: Long = 0,
     /** Authors recomputed from the relay per batch. */
     val projectBatch: Int = 200,
 ) {

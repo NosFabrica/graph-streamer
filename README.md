@@ -28,8 +28,8 @@ search relay ◀──── daily negentropy audit ───────┘  (n
    to live subscribers, so each new list, report, deletion and vanish arrives as the relay stores
    it. Quartz reconnects on its own, with backoff, and re-sends the REQ. When the connection
    drops, the stream rewrites its `since` to when it was last caught up (at EOSE, and at each live
-   event), minus `LIVE_OVERLAP_SECONDS`. So after an outage of any length the REQ asks from just
-   before it began, and a healthy connection costs nothing per event. The resume point is also
+   event), minus `LIVE_OVERLAP_SECONDS` (default 0). So after an outage of any length the REQ asks
+   from when it began, and a healthy connection costs nothing per event. The resume point is also
    saved every `LIVE_RESUME_POINT_SECONDS`, and a restart starts from it. Re-applying an event
    writes nothing.
    Any CLOSED but a rate limit with a stated back-off stops the process. After a CLOSED, Quartz
@@ -153,7 +153,7 @@ the one the recomputer read. A crash, or a kind 5 that arrives mid-recompute, le
 | `AUDIT_WINDOW` | `50000` | lists per reconcile window |
 | `AUDIT_MAX_DELETES` | `10000` | absent events per kind per audit; `0` = no limit |
 | `LIVE_RESUME_POINT_SECONDS` | `60` | how often the live stream's resume point is saved for a restart |
-| `LIVE_OVERLAP_SECONDS` | `600` | how far before the last caught-up moment a reconnect asks from |
+| `LIVE_OVERLAP_SECONDS` | `0` | how far before the last caught-up moment a reconnect or restart asks from. At 0, events still queued for the graph when the process stops wait for the next audit |
 | `PROJECT_BATCH` | `200` | authors per recompute (one relay read) |
 
 It is stateless and runs as one replica, because it must be the only writer of these edges. It
