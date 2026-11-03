@@ -19,9 +19,9 @@ node, which events its edges came from, and that is what the audit compares with
 ```
 search relay ──── list / report ──────▶ apply (newer list replaces; report adds) ─┐
   (live REQ)                                                                      ├─▶ Neo4j + Redis
-                          mark author dirty ─▶ recompute from the relay ─────────┘
-                                 ▲
-search relay ◀──── daily negentropy audit (need: download + apply; have: mark dirty)
+                                       recompute the author from the relay ──────┘
+                                                  ▲
+search relay ◀──── daily negentropy audit (need: download + apply; have: recompute)
 ```
 
 1. **Live stream.** One long-lived REQ on the search relay. The relay fans its sync's writes out
@@ -46,15 +46,16 @@ search relay ◀──── daily negentropy audit (need: download + apply; hav
    in, and its id and `created_at` are recorded. A report adds its targets and records its id.
    Nothing is ever *removed* by applying an event.
 3. **Recompute.** When the audit finds the relay no longer holds an event the graph was built
-   from, the relay has already applied whatever removed it. Its author is marked dirty, and the
-   recomputer rebuilds dirty authors from everything the relay holds for them now (batched, `PROJECT_BATCH` per read), diffing against the graph. This is the
-   only way edges leave the graph. A relay read that doesn't finish changes nothing, and the author
-   stays dirty.
+   from, the relay has already applied whatever removed it. The audit rebuilds that author from
+   everything the relay holds for them now (batched, `PROJECT_BATCH` per read), diffing against
+   the graph. This is the only way edges leave the graph. A relay read that doesn't finish
+   changes nothing; the audit stops recomputing that kind, and the next audit finds the same
+   events still missing.
 4. **Audit.** Every `AUDIT_EVERY_HOURS`, each kind is reconciled with the relay over NIP-77.
    Our side is read from the graph's bookkeeping:
    - *need* (the relay has it, the graph doesn't): downloaded and applied. This covers late
      arrivals, missed live events and, on the first run, the whole past.
-   - *have* (the graph has it, the relay doesn't): the author is marked dirty and recomputed, for
+   - *have* (the graph has it, the relay doesn't): the author is recomputed, for
      whatever reason the relay dropped it: a deletion, a vanish, an expiry, a ban.
      The search relay is the source of truth, the same way vespa-relay's `deleteMissing` treats a
      provider's relay.
@@ -125,16 +126,17 @@ through. Reports are few, so they are read whole.
 (SADD/SREM of the author as their edges change), and the forward set `designates:<author>`
 (replaced whole in one MULTI). Written after Neo4j.
 
-The service's own keys:
+Redis holds only those sets, which the GrapeRank worker and the server read. The service keeps
+no state of its own there: that Redis may evict any key (`allkeys-lru`).
 
-| key | meaning |
+**The service's own state:** one `(:GraphStreamerState {name: "graph-streamer"})` node in the
+same Neo4j, every value a string.
+
+| property | meaning |
 |---|---|
-| `graph_streamer:dirty` | HASH author → generation: authors waiting to be recomputed from the relay |
-| `graph_streamer:live_since` | epoch seconds the live stream resumes from after a restart (its last resume point) |
-| `graph_streamer:audit` | HASH: the last audit's start and finish, and per kind `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
-
-A dirty mark is cleared only after the author is written, and only if its generation is still
-the one the recomputer read. A crash, or a new mark that arrives mid-recompute, leaves it marked.
+| `live_since` | epoch seconds the live stream resumes from after a restart (its last resume point) |
+| `audit_started_at`, `audit_finished_at` | the last audit's start and finish; the next is due `AUDIT_EVERY_HOURS` after the finish |
+| `audit_<kind>_<counter>` | per audited kind (`follows`, `mutes`, `designations`, `reports`): `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
 
 ## Running
 
@@ -162,7 +164,9 @@ needs the `NostrUser.pubkey` uniqueness constraint that brainstorm_server create
 
 ### Dry run
 
-`DRY_RUN=true` writes nothing to Neo4j, schema included, and nothing to the graph's Redis sets.
+`DRY_RUN=true` writes nothing to the graph, schema included, and nothing to the graph's Redis
+sets. It does keep its state node: without it every restart would run a full dry-run audit,
+which downloads the relay's whole set.
 It only counts the changes it would make (`stats:` log line, every minute). Because it records
 no bookkeeping, every dry-run audit compares against an empty side and downloads everything the
 relay holds. That is the measurement you want once: how far the neofry-built graph is from the

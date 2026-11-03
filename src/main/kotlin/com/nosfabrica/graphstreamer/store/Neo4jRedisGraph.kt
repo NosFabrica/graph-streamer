@@ -5,9 +5,7 @@ import com.nosfabrica.graphstreamer.projection.Edge
 import com.nosfabrica.graphstreamer.projection.ListHead
 import com.nosfabrica.graphstreamer.projection.ListKind
 import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
-import org.neo4j.driver.AuthTokens
 import org.neo4j.driver.Driver
-import org.neo4j.driver.GraphDatabase
 import org.neo4j.driver.TransactionContext
 import redis.clients.jedis.JedisPool
 
@@ -31,9 +29,6 @@ class Neo4jRedisGraph(
     private val redis: JedisPool,
 ) : GraphStore,
     AutoCloseable {
-    constructor(url: String, username: String, password: String, redis: JedisPool) :
-        this(GraphDatabase.driver(url, AuthTokens.basic(username, password)), redis)
-
     override fun close() = driver.close()
 
     override fun read(authors: List<String>): Map<String, AuthorState> {

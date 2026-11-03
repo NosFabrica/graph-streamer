@@ -5,7 +5,6 @@ import com.nosfabrica.graphstreamer.store.AuthorChange
 import com.nosfabrica.graphstreamer.store.AuthorSource
 import com.nosfabrica.graphstreamer.store.EdgeChange
 import com.nosfabrica.graphstreamer.store.GraphStore
-import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -17,9 +16,9 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * - [apply]: lists and reports as they arrive (live, or downloaded by an audit). A list replaces
  *   the one the graph holds only if it is newer; a report adds its targets.
- * - [recomputeOnce]: authors marked dirty (an audit found the relay no longer holds an event of
- *   theirs) are rebuilt from what the relay holds now. The relay has already applied the
- *   deletion, the vanish or the expiry, so this is how anything leaves the graph.
+ * - [recompute]: authors an audit found the relay no longer holds an event of are rebuilt from
+ *   what the relay holds now. The relay has already applied the deletion, the vanish or the
+ *   expiry, so this is how anything leaves the graph.
  *
  * Every write is read-compute-write under one lock, so the two never interleave on an author.
  * With [dryRun] the changes are counted and logged, and the graph is not touched.
@@ -27,9 +26,9 @@ import java.util.concurrent.atomic.AtomicLong
 class Projector(
     private val graph: GraphStore,
     private val source: AuthorSource,
-    private val state: StreamerState,
     private val dryRun: Boolean,
-    private val batchSize: Int,
+    /** Authors recomputed from the relay per read. */
+    val batchSize: Int,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
     private val log = LoggerFactory.getLogger(Projector::class.java)
@@ -58,12 +57,13 @@ class Projector(
         }
     }
 
-    /** Recomputes one batch of dirty authors from the relay; returns how many there were (0: nothing to do). */
-    suspend fun recomputeOnce(): Int =
+    /**
+     * Rebuilds [authors] (at most [batchSize]) from what the relay holds for them now; returns how
+     * many. Throws, writing nothing, unless the relay's answer drained.
+     */
+    suspend fun recompute(authors: List<String>): Int =
         lock.withLock {
-            val dirty = state.dirty(batchSize)
-            if (dirty.isEmpty()) return@withLock 0
-            val authors = dirty.map { it.pubkey }
+            if (authors.isEmpty()) return@withLock 0
             // Throws IncompleteRead unless the relay drained: half an answer would read as deletions.
             val byAuthor = source.currentEvents(authors).groupBy { it.pubKey }
             val current = graph.read(authors)
@@ -73,7 +73,6 @@ class Projector(
                     change(author, current[author] ?: AuthorState(), GraphRules.fromRelay(author, byAuthor[author].orEmpty(), now))
                 },
             )
-            state.clearDirty(dirty)
             authorsRecomputed.addAndGet(authors.size.toLong())
             authors.size
         }

@@ -6,7 +6,7 @@ import com.nosfabrica.graphstreamer.relay.Audit
 import com.nosfabrica.graphstreamer.relay.LiveStream
 import com.nosfabrica.graphstreamer.relay.SearchRelayReader
 import com.nosfabrica.graphstreamer.store.Neo4jRedisGraph
-import com.nosfabrica.graphstreamer.store.RedisStreamerState
+import com.nosfabrica.graphstreamer.store.Neo4jStreamerState
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
@@ -18,6 +18,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import org.neo4j.driver.AuthTokens
+import org.neo4j.driver.GraphDatabase
 import org.slf4j.LoggerFactory
 import redis.clients.jedis.JedisPool
 import java.util.concurrent.TimeUnit
@@ -26,9 +28,9 @@ import kotlin.system.exitProcess
 private val log = LoggerFactory.getLogger("graph-streamer")
 
 /**
- * Long-running and stateless: one replica, because it is the graph's one writer for these edges
- * and the dirty set assumes one recomputer. Any loop that dies takes the process with it, and
- * Kubernetes restarts it; the graph's bookkeeping and the dirty set carry everything across.
+ * Long-running and stateless: one replica, because it is the graph's one writer for these edges.
+ * Any loop that dies takes the process with it, and Kubernetes restarts it; the graph's
+ * bookkeeping and its state node in Neo4j carry everything across.
  */
 fun main() {
     val config = Config.fromEnv()
@@ -47,8 +49,10 @@ private suspend fun run(config: Config) {
     val relay = RelayUrlNormalizer.normalize(config.searchRelayUrl)
     log.info("graph-streamer: relay={} dryRun={}", relay.url, config.dryRun)
 
+    // Redis holds only the sets other services read: the GrapeRank worker and the server.
     val redis = JedisPool(config.redisHost, config.redisPort)
-    val state = RedisStreamerState(redis)
+    val neo4j = GraphDatabase.driver(config.neo4jUrl, AuthTokens.basic(config.neo4jUsername, config.neo4jPassword))
+    val state = Neo4jStreamerState(neo4j)
     val http =
         OkHttpClient
             .Builder()
@@ -58,47 +62,29 @@ private suspend fun run(config: Config) {
             .build()
     val client = NostrClient(BasicOkHttpWebSocket.Builder { http })
 
-    Neo4jRedisGraph(config.neo4jUrl, config.neo4jUsername, config.neo4jPassword, redis).use { graph ->
-        // A dry run changes nothing in the shared Neo4j, schema included; it never reads these.
+    Neo4jRedisGraph(neo4j, redis).use { graph ->
+        // A dry run changes nothing in the graph, schema included; it never reads these. It does
+        // keep its own state node (Neo4jStreamerState).
         if (!config.dryRun) graph.ensureIndexes()
 
-        val projector = Projector(graph, SearchRelayReader(client, relay), state, config.dryRun, config.projectBatch)
+        val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch)
         val live = LiveStream(client, relay, projector, state, config.liveOverlapSeconds, config.liveResumePointSeconds * 1000)
-        val audit = Audit(client, relay, graph, projector, state, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes))
+        val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes))
 
         try {
             coroutineScope {
                 launch { live.run() }
-                launch { recomputeForever(projector) }
                 if (config.auditEveryHours > 0) launch { auditForever(audit, state, config.auditEveryHours * 3600) }
                 launch {
                     while (isActive) {
                         delay(STATS_EVERY_MS)
-                        log.info("stats: dirty={} {}", state.dirtyCount(), projector.stats())
+                        log.info("stats: {}", projector.stats())
                     }
                 }
             }
         } finally {
             client.close()
             redis.close()
-        }
-    }
-}
-
-private suspend fun recomputeForever(projector: Projector) {
-    var failures = 0
-    while (true) {
-        try {
-            if (projector.recomputeOnce() == 0) delay(IDLE_MS)
-            failures = 0
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // The batch stays dirty and is retried; a relay or graph that stays down stops the process.
-            failures++
-            log.error("recompute failed ({} in a row)", failures, e)
-            if (failures >= MAX_FAILURES) throw e
-            delay(minOf(60_000L, 1_000L shl minOf(failures, 6)))
         }
     }
 }
@@ -136,6 +122,4 @@ private suspend fun auditForever(
     }
 }
 
-private const val IDLE_MS = 1_000L
 private const val STATS_EVERY_MS = 60_000L
-private const val MAX_FAILURES = 20

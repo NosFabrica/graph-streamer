@@ -5,7 +5,6 @@ import com.nosfabrica.graphstreamer.projection.Edge
 import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.store.AuthorChange
 import com.nosfabrica.graphstreamer.store.AuthorSource
-import com.nosfabrica.graphstreamer.store.DirtyAuthor
 import com.nosfabrica.graphstreamer.store.GraphStore
 import com.nosfabrica.graphstreamer.store.IncompleteRead
 import com.nosfabrica.graphstreamer.store.StreamerState
@@ -13,20 +12,9 @@ import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
 import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
 
-/** The Redis state in memory, with the same generation semantics as the Lua clear. */
+/** The state node in memory. */
 class FakeState : StreamerState {
-    val dirty = LinkedHashMap<String, Long>()
     val audit = mutableMapOf<String, String>()
-
-    override fun markDirty(pubkeys: Collection<String>) {
-        for (pk in pubkeys) dirty[pk] = (dirty[pk] ?: 0) + 1
-    }
-
-    override fun dirty(limit: Int) = dirty.entries.take(limit).map { DirtyAuthor(it.key, it.value) }
-
-    override fun clearDirty(authors: List<DirtyAuthor>): Int = authors.count { a -> (dirty[a.pubkey] == a.generation).also { if (it) dirty.remove(a.pubkey) } }
-
-    override fun dirtyCount() = dirty.size.toLong()
 
     override fun lastAuditFinishedAt() = audit["finished_at"]?.toLong()
 

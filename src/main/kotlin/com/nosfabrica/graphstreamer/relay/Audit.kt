@@ -4,7 +4,6 @@ import com.nosfabrica.graphstreamer.RelayFilters
 import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.projection.Projector
 import com.nosfabrica.graphstreamer.store.GraphStore
-import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.NegentropyLocalIndex
@@ -23,7 +22,8 @@ import org.slf4j.LoggerFactory
  *
  * - **need** (the relay has it, the graph doesn't): downloaded and applied. Late arrivals, missed
  *   live events and, on the first run, the whole past.
- * - **have** (the graph has it, the relay doesn't): its author is recomputed from the relay, for
+ * - **have** (the graph has it, the relay doesn't): its author is recomputed from the relay, here
+ *   and now, in [Projector.batchSize] batches, for
  *   whatever reason the relay dropped it — a NIP-09 deletion without a `k` tag, a vanish, an
  *   expiry, a ban. The same absence-based retraction as vespa-relay's `deleteMissing`.
  *
@@ -37,7 +37,6 @@ class Audit(
     private val relay: NormalizedRelayUrl,
     private val graph: GraphStore,
     private val projector: Projector,
-    private val state: StreamerState,
     private val dryRun: Boolean,
     private val targetWindow: Int,
     private val guard: AbsenceGuard,
@@ -123,15 +122,28 @@ class Audit(
 
         val verdict = guard.decide(haves.size, completed = failure == null && !unreconciled, windows = windows)
         var recomputed = 0
+        var recomputeFailure: String? = null
         if (verdict.act) {
-            val authors = authorsOf(haves)
-            state.markDirty(authors)
-            recomputed = authors.size
+            // A batch the relay can't answer in full writes nothing. The rest wait for the next
+            // audit, which finds the same events still missing.
+            try {
+                for (batch in authorsOf(haves).chunked(projector.batchSize)) recomputed += projector.recompute(batch)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                recomputeFailure = e.message ?: e.javaClass.simpleName
+                log.warn("audit {}: recompute stopped after {} authors", name, recomputed, e)
+            }
         } else if (haves.isNotEmpty()) {
             log.warn("audit {}: {} events the relay lacks kept: {}", name, haves.size, verdict.reason)
         }
 
-        val note = listOfNotNull(failure?.let { "reconcile failed ($it); paged instead" }, verdict.reason.takeIf { haves.isNotEmpty() && !verdict.act }).joinToString("; ").ifEmpty { null }
+        val note =
+            listOfNotNull(
+                failure?.let { "reconcile failed ($it); paged instead" },
+                verdict.reason.takeIf { haves.isNotEmpty() && !verdict.act },
+                recomputeFailure?.let { "recompute stopped after $recomputed ($it); the rest wait for the next audit" },
+            ).joinToString("; ").ifEmpty { null }
         val report = Report(name, need, haves.size, downloaded, recomputed, complete = failure == null && !unreconciled && windows > 0, note = note)
         log.info("audit {}", report)
         return report

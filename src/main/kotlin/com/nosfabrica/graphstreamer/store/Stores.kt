@@ -6,31 +6,12 @@ import com.nosfabrica.graphstreamer.projection.ListKind
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
 
-/** An author waiting to be recomputed from the relay, and the generation it was marked at. */
-data class DirtyAuthor(
-    val pubkey: String,
-    val generation: Long,
-)
-
 /**
- * The service's own small state: Redis in production.
- *
- * The dirty set holds authors to recompute from the relay: those whose events an audit found the
- * relay no longer holds. A mark is cleared only
- * after the author is written, and only if nobody marked them again meanwhile (the generation
- * still matches), so a crash or a mark during a recompute leaves them marked.
+ * The service's own small state: where the live stream resumes after a restart, and the last
+ * audit's report. One node in the same Neo4j as the graph in production ([Neo4jStreamerState]).
  */
 interface StreamerState {
-    fun markDirty(pubkeys: Collection<String>)
-
-    /** Up to [limit] marked authors, in no particular order (one that keeps failing can't block the rest). */
-    fun dirty(limit: Int): List<DirtyAuthor>
-
-    /** Clears each author whose generation is still the one read; returns how many were cleared. */
-    fun clearDirty(authors: List<DirtyAuthor>): Int
-
-    fun dirtyCount(): Long
-
+    /** When the last audit finished, epoch seconds: the next is due [Config.auditEveryHours] later. */
     fun lastAuditFinishedAt(): Long?
 
     /** Where the live stream resumes after a restart: the last `since` it would have reconnected from. */

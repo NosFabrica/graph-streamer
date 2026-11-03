@@ -18,12 +18,11 @@ import kotlin.test.assertTrue
  * The fake relay here holds what the real one would serve after doing so.
  */
 class ProjectionTest {
-    private val state = FakeState()
     private val graph = FakeGraph()
     private val relay = FakeRelay()
     private var now = System.currentTimeMillis() / 1000
 
-    private fun projector(dryRun: Boolean = false) = Projector(graph, relay, state, dryRun, batchSize = 100, clock = { now })
+    private fun projector(dryRun: Boolean = false) = Projector(graph, relay, dryRun, batchSize = 100, clock = { now })
 
     private val alice = Signer()
     private val t0 = now - 1000
@@ -34,8 +33,9 @@ class ProjectionTest {
         projector().apply(events.toList())
     }
 
-    private suspend fun recomputeAll() {
-        while (projector().recomputeOnce() > 0) Unit
+    /** What the audit does for an author whose event the relay no longer holds. */
+    private suspend fun auditFindsGone(author: String) {
+        projector().recompute(listOf(author))
     }
 
     @Test
@@ -65,13 +65,11 @@ class ProjectionTest {
             arrive(list)
             // The relay applies a kind 5 (drops the list); the next audit finds it gone.
             relay.events.remove(list)
-            state.markDirty(listOf(alice.pubkey))
             assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
 
-            recomputeAll()
+            auditFindsGone(alice.pubkey)
             assertTrue(graph.edges(alice.pubkey, Edge.FOLLOWS).isEmpty())
             assertEquals(null, graph.authors[alice.pubkey]?.heads?.get(ListKind.FOLLOWS))
-            assertTrue(state.dirty.isEmpty())
         }
 
     @Test
@@ -83,8 +81,7 @@ class ProjectionTest {
             assertEquals(setOf(hex(7), hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
 
             relay.events.remove(report)
-            state.markDirty(listOf(alice.pubkey)) // the audit finds the report gone
-            recomputeAll()
+            auditFindsGone(alice.pubkey)
             assertEquals(setOf(hex(8)), graph.edges(alice.pubkey, Edge.REPORTS))
             assertEquals(setOf(other.id), graph.authors[alice.pubkey]?.reports?.keys)
         }
@@ -103,24 +100,22 @@ class ProjectionTest {
             assertEquals(setOf(hex(4)), graph.edges(alice.pubkey, Edge.DESIGNATES))
 
             relay.events.removeAll(events.toSet()) // the relay applies a kind 62
-            state.markDirty(listOf(alice.pubkey)) // and the audit finds them all gone
-            recomputeAll()
+            auditFindsGone(alice.pubkey)
             for (edge in Edge.entries) assertTrue(graph.edges(alice.pubkey, edge).isEmpty(), "$edge left behind")
             assertTrue(graph.authors[alice.pubkey]!!.heads.isEmpty())
             assertTrue(graph.authors[alice.pubkey]!!.reports.isEmpty())
         }
 
     @Test
-    fun aRecomputeThatCannotFinishWritesNothingAndKeepsTheAuthor() =
+    fun aRecomputeThatCannotFinishWritesNothing() =
         runTest {
             val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
             arrive(list)
             relay.events.remove(list)
-            state.markDirty(listOf(alice.pubkey))
             relay.drains = false
-            assertFailsWith<IncompleteRead> { projector().recomputeOnce() }
+            // Half an answer would read as deletions; the next audit finds the list gone again.
+            assertFailsWith<IncompleteRead> { projector().recompute(listOf(alice.pubkey)) }
             assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
-            assertTrue(alice.pubkey in state.dirty)
         }
 
     @Test
@@ -131,8 +126,7 @@ class ProjectionTest {
             assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.MUTES))
 
             now = expiresAt
-            state.markDirty(listOf(alice.pubkey))
-            recomputeAll()
+            auditFindsGone(alice.pubkey)
             assertTrue(graph.edges(alice.pubkey, Edge.MUTES).isEmpty())
         }
 
@@ -156,16 +150,6 @@ class ProjectionTest {
         }
 
     @Test
-    fun aMarkDuringARecomputeKeepsTheAuthorDirty() =
-        runTest {
-            state.markDirty(listOf(alice.pubkey))
-            val read = state.dirty(10)
-            state.markDirty(listOf(alice.pubkey)) // another audit's mark, after the recompute read
-            assertEquals(0, state.clearDirty(read))
-            assertTrue(alice.pubkey in state.dirty)
-        }
-
-    @Test
     fun aDeletionOrVanishHandedToApplyChangesNothing() =
         runTest {
             projector().apply(
@@ -174,7 +158,6 @@ class ProjectionTest {
                     alice.event(62, listOf(listOf("relay", "ALL_RELAYS")), createdAt = t0),
                 ),
             )
-            assertTrue(graph.writes.isEmpty())
-            assertTrue(state.dirty.isEmpty(), "only the audit marks authors")
+            assertTrue(graph.writes.isEmpty(), "only an audit's recompute removes anything")
         }
 }
