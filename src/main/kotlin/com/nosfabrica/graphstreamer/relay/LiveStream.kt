@@ -52,8 +52,7 @@ class LiveStream(
                 client
                     .subscribeEvents(
                         relay = relay,
-                        filters = RelayFilters.live(),
-                        since = state.liveSince() ?: (clock() - overlapSeconds),
+                        filters = RelayFilters.live(since = state.liveSince() ?: (clock() - overlapSeconds)),
                         overlapSeconds = overlapSeconds,
                         sinceUpdateIntervalMs = sinceUpdateIntervalMs,
                         onResumePoint = { state.putLiveSince(it) },
