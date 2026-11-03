@@ -1,8 +1,10 @@
 package com.nosfabrica.graphstreamer.relay
 
-// A copy of Quartz's NostrClientSubscribeEventsExt.kt (quartz nip01Core/relay/client/accessories/, vitorpamplona/quartz#82),
-// not released yet. Delete this file and import Quartz's once graph-streamer depends on the release
-// that has it; nothing else changes.
+// A copy of Quartz's NostrClientSubscribeEventsExt.kt (quartz nip01Core/relay/client/accessories/,
+// vitorpamplona/quartz#82) as it was before the pool's SubscriptionListener.filtersForSync hook:
+// Quartz 2.13.0 has no such hook, so this version rewrites `since` from a disconnect listener
+// instead. Same signature and behaviour. Delete this file and import Quartz's once graph-streamer
+// depends on the release that has it; nothing else changes.
 
 import com.vitorpamplona.crypto.random.RandomInstance
 import com.vitorpamplona.quartz.nip01Core.core.Event
