@@ -25,10 +25,11 @@ data class Config(
      */
     val auditMaxDeletes: Int = 10_000,
     /**
-     * How often the live REQ's stored `since` may move forward (to when it was last caught up,
-     * minus [liveOverlapSeconds]). A `since`-only change sends nothing; it is what a reconnect asks from.
+     * How often the live stream's resume point (when it was last caught up, minus
+     * [liveOverlapSeconds]) is saved for a restart. A reconnect needs no saving: the stream
+     * rewrites its own `since` when the connection drops.
      */
-    val liveSinceUpdateSeconds: Long = 60,
+    val liveResumePointSeconds: Long = 60,
     /** How far before the last caught-up moment a reconnect asks from. */
     val liveOverlapSeconds: Long = 600,
     /** Authors recomputed from the relay per batch. */
@@ -52,7 +53,7 @@ data class Config(
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,
-                liveSinceUpdateSeconds = optional("LIVE_SINCE_UPDATE_SECONDS")?.toLong() ?: defaults.liveSinceUpdateSeconds,
+                liveResumePointSeconds = optional("LIVE_RESUME_POINT_SECONDS")?.toLong() ?: defaults.liveResumePointSeconds,
                 liveOverlapSeconds = optional("LIVE_OVERLAP_SECONDS")?.toLong() ?: defaults.liveOverlapSeconds,
                 projectBatch = optional("PROJECT_BATCH")?.toInt() ?: defaults.projectBatch,
             )

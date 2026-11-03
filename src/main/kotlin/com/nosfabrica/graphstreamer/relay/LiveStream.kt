@@ -19,9 +19,10 @@ import org.slf4j.LoggerFactory
  * report, deletion and vanish as the relay stores it.
  *
  * Built on [subscribeEvents]:
- * - **Reconnects resume.** The client reconnects on its own. `since` moves forward only while
- *   the subscription is known to be caught up (EOSE, live events), so after an outage the REQ
- *   asks from just before it began, minus [overlapSeconds]. Re-applying an event writes nothing.
+ * - **Reconnects resume.** The client reconnects on its own. When the connection drops, the
+ *   stream rewrites its `since` to when it was last caught up (EOSE, live events), minus
+ *   [overlapSeconds], so the re-sent REQ asks from just before the outage began. Re-applying an
+ *   event writes nothing.
  * - **Restarts resume.** Each resume point is saved ([StreamerState.putLiveSince]) and the next
  *   process starts from it. It covers what reached this stream, which can run ahead of what the
  *   projector applied by the inbox's backlog; the overlap covers a backlog shorter than it, and
@@ -40,7 +41,7 @@ class LiveStream(
     private val projector: Projector,
     private val state: StreamerState,
     private val overlapSeconds: Long,
-    private val sinceUpdateIntervalMs: Long,
+    private val resumePointIntervalMs: Long,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
     private val log = LoggerFactory.getLogger(LiveStream::class.java)
@@ -54,7 +55,7 @@ class LiveStream(
                         relay = relay,
                         filters = RelayFilters.live(since = state.liveSince() ?: (clock() - overlapSeconds)),
                         overlapSeconds = overlapSeconds,
-                        sinceUpdateIntervalMs = sinceUpdateIntervalMs,
+                        resumePointIntervalMs = resumePointIntervalMs,
                         onResumePoint = { state.putLiveSince(it) },
                         nowInSeconds = clock,
                     ).collect { inbox.send(it) }
