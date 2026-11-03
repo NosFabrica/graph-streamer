@@ -10,7 +10,7 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 
 | Path | What |
 |---|---|
-| `Main.kt` | Wires the relay client, Redis and Neo4j; runs the live stream, recompute, audit and stats loops. |
+| `Main.kt` | Wires the relay client, Redis and Neo4j; runs the live stream, audit (which recomputes) and stats loops. |
 | `Config.kt` | Environment. `DRY_RUN` defaults to true. |
 | `RelayFilters.kt` | Every filter sent to the relay: live, audit, by-author. |
 | `projection/GraphRules.kt` | Pure: `apply` (events onto an author's state) and `fromRelay` (state from the relay's events). Parsing matches brainstorm_server's. |
