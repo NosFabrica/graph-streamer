@@ -32,8 +32,11 @@ search relay ◀──── daily negentropy audit ───────┘  (n
    before it began, and a healthy connection costs nothing per event. The resume point is also
    saved every `LIVE_RESUME_POINT_SECONDS`, and a restart starts from it. Re-applying an event
    writes nothing.
-   Any CLOSED but a rate limit with a stated back-off stops the process: after a CLOSED, Quartz
-   doesn't re-send the REQ on its own, and a silent subscription would be worse than a restart.
+   Any CLOSED but a rate limit with a stated back-off stops the process. After a CLOSED, Quartz
+   doesn't send the REQ again on the same connection, only on the next reconnect or AUTH, and not
+   at all once the relay has refused the same filters three times. On a healthy connection that
+   can be never, and a stream that is silent until the socket happens to drop is worse than a
+   restart.
 2. **Apply.** A list (kind 3, 10000 or 10040) replaces the one the author's node records only
    if it is newer: later `created_at`, or the lower id on the same second. Its edges are diffed
    in, and its id and `created_at` are recorded. A report adds its targets and records its id.

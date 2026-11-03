@@ -28,8 +28,9 @@ import org.slf4j.LoggerFactory
  *   [resumePointIntervalMs] ([StreamerState.putLiveSince]) and the next process starts from it.
  *   It covers what reached this stream, which can run ahead of what the projector applied by the
  *   inbox's backlog; the overlap covers a backlog shorter than it, and the audit anything beyond.
- * - **A CLOSED ends the stream, and the process.** After a CLOSED the client won't re-send the
- *   REQ on its own, so the subscription would go quiet for good. This client has no NIP-42
+ * - **A CLOSED ends the stream, and the process.** After a CLOSED the client doesn't send the REQ
+ *   again on the same connection, only on the next reconnect or AUTH (and never once the relay
+ *   has refused the same filters three times), so the stream could go quiet for hours. This client has no NIP-42
  *   responder, so even an `auth-required:` one ends [run] at once; only a rate limit with a
  *   stated back-off, which the client retries, doesn't. Main lets it stop the process, and
  *   Kubernetes restarts it with a fresh client.
