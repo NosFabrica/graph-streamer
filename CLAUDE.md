@@ -15,8 +15,7 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 | `RelayFilters.kt` | Every filter sent to the relay: live, audit, by-author. |
 | `projection/GraphRules.kt` | Pure: `apply` (events onto an author's state) and `fromRelay` (state from the relay's events). Parsing matches brainstorm_server's. |
 | `projection/Projector.kt` | The only graph writer: applies events, recomputes dirty authors, under one lock. |
-| `relay/LiveStream.kt` | The live REQ, applied in batches; any CLOSED stops the process. |
-| `relay/SubscribeEvents.kt`, `relay/ResumePolicy.kt` | Copies of Quartz's `subscribeEvents` and its `ResumePolicy`/`CaughtUpResume` (ends on CLOSED; resumes where the policy says) until a Quartz release ships them. Delete them then; don't edit them here. |
+| `relay/LiveStream.kt` | The live REQ (Quartz's `subscribeEvents`), applied in batches; a CLOSED the client can't recover from stops the process. |
 | `relay/Audit.kt` | NIP-77 reconcile per kind against the graph's bookkeeping; `AbsenceGuard`; `GraphListIndex`. |
 | `relay/SearchRelayReader.kt` | By-author reads for recomputes; throws unless the relay drained. |
 | `store/` | `StreamerState` (dirty set, audit report), `GraphStore` (Neo4j + Redis), `AuthorSource`, and their implementations. |

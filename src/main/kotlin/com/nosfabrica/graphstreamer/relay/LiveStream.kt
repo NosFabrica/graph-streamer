@@ -5,6 +5,10 @@ import com.nosfabrica.graphstreamer.projection.Projector
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.subscribeEvents
+import com.vitorpamplona.quartz.nip01Core.relay.client.reqs.CaughtUpResume
+import com.vitorpamplona.quartz.nip01Core.relay.client.reqs.ResumePolicy
+import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -19,21 +23,24 @@ import org.slf4j.LoggerFactory
  * its sync's writes out to live subscribers like any other publish, so this sees each new list,
  * report, deletion and vanish as the relay stores it.
  *
- * Built on [subscribeEvents]:
- * - **Reconnects resume.** The client reconnects on its own. When the connection drops, the
- *   stream rewrites its `since` to when it was last caught up (EOSE, live events), minus
- *   [overlapSeconds] (default 0), so the re-sent REQ asks from when the outage began. Re-applying
- *   an event writes nothing.
- * - **Restarts resume.** The resume point ([CaughtUpResume.resumeFrom]) is saved every
- *   [resumePointIntervalMs] ([StreamerState.putLiveSince]) and the next process starts from it.
- *   It covers what reached this stream, which can run ahead of what the projector applied by the
- *   inbox's backlog; an overlap covers a backlog shorter than it, and the audit anything beyond.
+ * Built on Quartz's `subscribeEvents`:
+ * - **Reconnects resume.** The client reconnects on its own, and each time it writes the REQ again
+ *   Quartz's [CaughtUpResume] moves its `since` to the newest `created_at` this stream was handed
+ *   (stored events counted at EOSE, capped at this machine's clock), minus [overlapSeconds]
+ *   (default 0). So the re-sent REQ asks from where the outage began. Re-applying an event
+ *   writes nothing.
+ * - **Restarts resume.** That point ([CaughtUpResume.caughtUpAt], minus [overlapSeconds]) is saved
+ *   every [resumePointIntervalMs] ([StreamerState.putLiveSince]) and the next process starts from
+ *   it. It covers what reached this stream, which can run ahead of what the projector applied by
+ *   the inbox's backlog; an overlap covers a backlog shorter than it, and the audit anything beyond.
  * - **A CLOSED ends the stream, and the process.** After a CLOSED the client doesn't send the REQ
  *   again on the same connection, only on the next reconnect or AUTH (and never once the relay
- *   has refused the same filters three times), so the stream could go quiet for hours. This client has no NIP-42
- *   responder, so even an `auth-required:` one ends [run] at once; only a rate limit with a
- *   stated back-off, which the client retries, doesn't. Main lets it stop the process, and
- *   Kubernetes restarts it with a fresh client.
+ *   has refused the same filters three times), so the stream could go quiet for hours. This client
+ *   has no NIP-42 responder, so even an `auth-required:` one ends [run] at once. Two kinds don't
+ *   end it, because the client recovers from them itself: a rate limit with a stated back-off, and
+ *   an `error:` or unprefixed CLOSED followed within 3 s by the connection dropping (a relay
+ *   restarting), unless that happens three times running. Main lets the rest stop the process,
+ *   and Kubernetes restarts it with a fresh client.
  *
  * What the relay stores late with an old `created_at` never streams; the audit downloads it.
  */
@@ -51,13 +58,13 @@ class LiveStream(
     suspend fun run(): Unit =
         coroutineScope {
             val inbox = Channel<Event>(INBOX)
-            val resume = CaughtUpResume(overlapSeconds, nowInSeconds = clock)
+            val caughtUp = CaughtUpResume(nowInSeconds = clock)
             launch {
                 client
                     .subscribeEvents(
                         relay = relay,
                         filters = RelayFilters.live(since = state.liveSince() ?: (clock() - overlapSeconds)),
-                        resume = resume,
+                        resume = if (overlapSeconds == 0L) caughtUp else Overlap(caughtUp, overlapSeconds),
                     ).collect { inbox.send(it) }
             }
             // Saves the resume point for a restart, on this service's own schedule.
@@ -65,7 +72,7 @@ class LiveStream(
                 var saved: Long? = null
                 while (isActive) {
                     delay(resumePointIntervalMs)
-                    val point = resume.resumeFrom() ?: continue
+                    val point = caughtUp.caughtUpAt(relay)?.minus(overlapSeconds) ?: continue
                     if (point != saved) {
                         state.putLiveSince(point)
                         saved = point
@@ -88,6 +95,17 @@ class LiveStream(
                 batch.clear()
             }
         }
+
+    /** [inner]'s resume point, [seconds] earlier: `LIVE_OVERLAP_SECONDS`. */
+    private class Overlap(
+        private val inner: CaughtUpResume,
+        private val seconds: Long,
+    ) : ResumePolicy by inner {
+        override fun resumeFrom(
+            relay: NormalizedRelayUrl,
+            filters: List<Filter>,
+        ): Long? = inner.resumeFrom(relay, filters)?.minus(seconds)
+    }
 
     companion object {
         private const val INBOX = 10_000
