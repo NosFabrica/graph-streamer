@@ -29,6 +29,12 @@ import org.slf4j.LoggerFactory
  *
  * Absence is acted on only when [AbsenceGuard] trusts it.
  *
+ * A reconcile that fails (the relay disconnects, times out, errors) is reported incomplete and
+ * pages nothing: the next audit re-runs it as a delta against the bookkeeping, which already holds
+ * everything applied so far. Paging the whole filter instead would download every list again,
+ * the whole corpus on a full audit. Only a window handed to `onUnreconcilableWindow`, which is
+ * bounded, is paged.
+ *
  * In a dry run the graph records nothing, so every audit compares against an empty side and
  * downloads the relay's whole set: the diffs it counts are how far the graph is from the relay.
  */
@@ -118,8 +124,7 @@ class Audit(
             throw e
         } catch (e: Exception) {
             failure = e.message ?: e.javaClass.simpleName
-            log.warn("audit {}: reconcile failed, paging the filter", name, e)
-            downloaded += page(filter)
+            log.warn("audit {}: reconcile failed after {} downloaded; the next audit resumes it", name, downloaded, e)
         }
 
         val verdict = guard.decide(haves.size, completed = failure == null && !unreconciled, windows = windows)
@@ -142,7 +147,7 @@ class Audit(
 
         val note =
             listOfNotNull(
-                failure?.let { "reconcile failed ($it); paged instead" },
+                failure?.let { "reconcile failed ($it); the next audit resumes it" },
                 verdict.reason.takeIf { haves.isNotEmpty() && !verdict.act },
                 recomputeFailure?.let { "recompute stopped after $recomputed ($it); the rest wait for the next audit" },
             ).joinToString("; ").ifEmpty { null }
@@ -151,7 +156,7 @@ class Audit(
         return report
     }
 
-    /** Pages [filter] into the graph when negentropy can't compare it. Fills only; recomputes nobody. */
+    /** Pages a window negentropy can't compare into the graph. Fills only; recomputes nobody. */
     private suspend fun page(filter: Filter): Int {
         val buffer = ArrayList<Event>(PAGE)
         var count = 0

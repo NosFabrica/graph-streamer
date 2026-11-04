@@ -77,7 +77,7 @@ private suspend fun run(config: Config) {
         try {
             coroutineScope {
                 launch { live.run() }
-                if (config.auditEveryHours > 0) launch { auditForever(audit, state, config.auditEveryHours * 3600) }
+                if (config.auditEveryHours > 0) launch { auditForever(audit, state, config.auditEveryHours * 3600, config.auditRetryMinutes * 60) }
                 launch {
                     while (isActive) {
                         delay(STATS_EVERY_MS)
@@ -96,17 +96,20 @@ private suspend fun auditForever(
     audit: Audit,
     state: StreamerState,
     everySeconds: Long,
+    retrySeconds: Long,
 ) {
     while (true) {
         val now = System.currentTimeMillis() / 1000
-        val last = state.lastAuditFinishedAt()
-        val wait = if (last == null) 0 else (last + everySeconds - now).coerceAtLeast(0)
+        val wait = AuditSchedule.waitSeconds(now, state.lastAuditFinishedAt(), state.lastAuditEndedAt(), everySeconds, retrySeconds)
         if (wait > 0) delay(wait * 1000)
 
         val startedAt = System.currentTimeMillis() / 1000
         try {
             val reports = audit.run()
-            val fields = mutableMapOf("started_at" to startedAt.toString(), "finished_at" to (System.currentTimeMillis() / 1000).toString())
+            val endedAt = (System.currentTimeMillis() / 1000).toString()
+            val complete = reports.all { it.complete }
+            val fields = mutableMapOf("started_at" to startedAt.toString(), "ended_at" to endedAt, "complete" to complete.toString())
+            if (complete) fields["finished_at"] = endedAt
             for (r in reports) {
                 fields["${r.name}.need"] = r.need.toString()
                 fields["${r.name}.have"] = r.have.toString()
@@ -116,12 +119,36 @@ private suspend fun auditForever(
                 fields["${r.name}.note"] = r.note ?: ""
             }
             state.putAuditReport(fields)
+            if (!complete) log.warn("audit incomplete; it runs again in {} min", retrySeconds / 60)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             log.error("audit failed; next try in an hour", e)
             delay(3_600_000)
         }
+    }
+}
+
+/** When the next audit is due. */
+object AuditSchedule {
+    /**
+     * Seconds to wait from [now]: [everySeconds] after the last complete audit ([finishedAt]),
+     * or [retrySeconds] after the last audit ([endedAt]) when that one did not complete. None yet: now.
+     */
+    fun waitSeconds(
+        now: Long,
+        finishedAt: Long?,
+        endedAt: Long?,
+        everySeconds: Long,
+        retrySeconds: Long,
+    ): Long {
+        val due =
+            when {
+                endedAt != null && (finishedAt == null || endedAt > finishedAt) -> endedAt + retrySeconds
+                finishedAt != null -> finishedAt + everySeconds
+                else -> now
+            }
+        return (due - now).coerceAtLeast(0)
     }
 }
 

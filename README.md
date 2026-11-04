@@ -69,7 +69,7 @@ An audit marks the authors of absent events only when:
 
 | guard | why |
 |---|---|
-| the reconcile **completed** | A window negentropy can't reconcile is paged instead (the graph still fills), and that kind recomputes nobody. The relay refuses a Vespa answer with partial coverage (`coverage.full: false`, vespa-eventstore `VespaEventIndex`), so a content node that is down fails the reconcile. It does not make a third of the corpus look deleted. |
+| the reconcile **completed** | A window negentropy can't reconcile is paged instead (the graph still fills), and that kind recomputes nobody. A reconcile that fails outright (a disconnect, a timeout) pages nothing: the audit is reported incomplete and runs again `AUDIT_RETRY_MINUTES` later, as a delta against the bookkeeping. The relay refuses a Vespa answer with partial coverage (`coverage.full: false`, vespa-eventstore `VespaEventIndex`), so a content node that is down fails the reconcile. It does not make a third of the corpus look deleted. |
 | ≥ 1 window compared | Zero windows compared nothing. |
 | older than 1 h | The audit stops at `until` = now − 1 h. An event the live stream just delivered may not be visible to the relay's id reads yet. |
 | ≤ `AUDIT_MAX_DELETES` absent per kind | Default 10 000; 0 turns it off. This relay is a mirror that has lost data before, so a mass absence is likelier its fault than a mass retraction. When the guard fires, the audit logs it and changes nothing. Raise the limit to let a real retraction through. |
@@ -135,7 +135,8 @@ same Neo4j, every value a string.
 | property | meaning |
 |---|---|
 | `live_since` | epoch seconds the live stream resumes from after a restart (its last resume point) |
-| `audit_started_at`, `audit_finished_at` | the last audit's start and finish; the next is due `AUDIT_EVERY_HOURS` after the finish |
+| `audit_started_at`, `audit_ended_at`, `audit_complete` | the last audit's start, end and whether every kind completed; an incomplete one runs again `AUDIT_RETRY_MINUTES` after its end |
+| `audit_finished_at` | when the last complete audit ended; the next is due `AUDIT_EVERY_HOURS` after it |
 | `audit_<kind>_<counter>` | per audited kind (`follows`, `mutes`, `designations`, `reports`): `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
 
 ## Running
@@ -152,6 +153,8 @@ same Neo4j, every value a string.
 | `SEARCH_RELAY_URL` | `wss://search.brainstorm.world` | |
 | `DRY_RUN` | `true` | `false` writes the graph; anything not a switch stops the boot |
 | `AUDIT_EVERY_HOURS` | `24` | `0` turns the audit off |
+| `AUDIT_RETRY_MINUTES` | `30` | when an incomplete audit (a failed reconcile) runs again |
+| `AUDIT_SINCE` | unset | epoch seconds: audit only events created from then on, both sides (a rehearsal or a partial rebuild) |
 | `AUDIT_WINDOW` | `50000` | lists per reconcile window |
 | `AUDIT_MAX_DELETES` | `10000` | absent events per kind per audit; `0` = no limit |
 | `LIVE_RESUME_POINT_SECONDS` | `60` | how often the live stream's resume point is saved for a restart |

@@ -17,6 +17,11 @@ data class Config(
     /** A negentropy audit of every graph kind against the relay this often; 0 turns it off. */
     val auditEveryHours: Long = 24,
     /**
+     * An audit that did not complete (a reconcile failed) runs again this long after it ended,
+     * not [auditEveryHours]: it resumes as a delta, and a first rebuild shouldn't sit half done for a day.
+     */
+    val auditRetryMinutes: Long = 30,
+    /**
      * When set, audits compare only events created at or after this (epoch seconds), on both
      * sides. For a rehearsal or a partial rebuild; older events are neither downloaded nor checked.
      */
@@ -59,6 +64,7 @@ data class Config(
                 searchRelayUrl = optional("SEARCH_RELAY_URL") ?: defaults.searchRelayUrl,
                 dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
+                auditRetryMinutes = optional("AUDIT_RETRY_MINUTES")?.toLong() ?: defaults.auditRetryMinutes,
                 auditSince = optional("AUDIT_SINCE")?.toLong(),
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,

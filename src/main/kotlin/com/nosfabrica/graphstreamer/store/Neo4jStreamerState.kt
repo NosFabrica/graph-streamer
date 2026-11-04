@@ -8,8 +8,9 @@ import org.neo4j.driver.Driver
  * nothing a cache could evict.
  *
  * - `live_since`: epoch seconds the live stream resumes from after a restart.
- * - `audit_started_at`, `audit_finished_at`, and per audited kind `audit_<kind>_<counter>` (`need`,
- *   `have`, `downloaded`, `recomputed`, `complete`, `note`): the last audit's report.
+ * - `audit_started_at`, `audit_ended_at`, `audit_complete`, and per audited kind
+ *   `audit_<kind>_<counter>` (`need`, `have`, `downloaded`, `recomputed`, `complete`, `note`): the
+ *   last audit's report. `audit_finished_at` is when the last complete one ended.
  *
  * Written in a dry run too: it is not the graph, and without it every restart would run a full
  * dry-run audit, which downloads the relay's whole set.
@@ -18,6 +19,8 @@ class Neo4jStreamerState(
     private val driver: Driver,
 ) : StreamerState {
     override fun lastAuditFinishedAt(): Long? = read("audit_finished_at")?.toLongOrNull()
+
+    override fun lastAuditEndedAt(): Long? = read("audit_ended_at")?.toLongOrNull()
 
     override fun liveSince(): Long? = read("live_since")?.toLongOrNull()
 

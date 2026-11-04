@@ -11,8 +11,11 @@ import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
  * audit's report. One node in the same Neo4j as the graph in production ([Neo4jStreamerState]).
  */
 interface StreamerState {
-    /** When the last audit finished, epoch seconds: the next is due [Config.auditEveryHours] later. */
+    /** When the last complete audit finished, epoch seconds: the next is due [Config.auditEveryHours] later. */
     fun lastAuditFinishedAt(): Long?
+
+    /** When the last audit ended, complete or not: an incomplete one is retried [Config.auditRetryMinutes] later. */
+    fun lastAuditEndedAt(): Long?
 
     /** Where the live stream resumes after a restart: the last `since` it would have reconnected from. */
     fun liveSince(): Long?

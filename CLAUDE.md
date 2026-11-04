@@ -30,6 +30,8 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 - **A recompute acts only on a read that drained** (`IncompleteRead` otherwise). Half an answer
   reads as deletions.
 - **Never act on absence without a completed reconcile.** A paged fallback fills the graph only.
+  Page only a bounded window: a failed reconcile is retried as a delta, never paged whole, since
+  that downloads the corpus again.
   Keep every guard in `AbsenceGuard` unless you replace it with a stronger one.
 - **Every graph write goes through `Projector`**, under its lock, with edges and bookkeeping in
   one Neo4j transaction. Bookkeeping that disagrees with the edges makes the audit wrong.
