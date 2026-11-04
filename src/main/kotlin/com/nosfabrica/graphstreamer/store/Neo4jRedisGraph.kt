@@ -92,6 +92,20 @@ class Neo4jRedisGraph(
         driver.session().use { session -> session.executeWriteWithoutResult { tx -> tx.run(CLEAR_PENDING, mapOf("authors" to authors)).consume() } }
     }
 
+    override fun orphanAuthors(
+        edge: Edge,
+        limit: Int,
+    ): List<String> {
+        val unrecorded = ListKind.entries.firstOrNull { it.edge == edge }?.let { "u.${it.prop}_event IS NULL" } ?: "u.report_events IS NULL"
+        return driver.session().use { s ->
+            s.executeRead { tx ->
+                tx
+                    .run("MATCH (u:NostrUser) WHERE $unrecorded AND EXISTS { (u)-[:${edge.relType}]->() } RETURN u.pubkey AS a LIMIT \$limit", mapOf("limit" to limit))
+                    .list { it["a"].asString() }
+            }
+        }
+    }
+
     override fun repairPendingRedis(): Int {
         var repaired = 0
         while (true) {

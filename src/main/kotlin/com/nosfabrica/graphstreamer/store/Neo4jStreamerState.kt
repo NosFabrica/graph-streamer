@@ -11,6 +11,7 @@ import org.neo4j.driver.Driver
  * - `audit_started_at`, `audit_ended_at`, `audit_complete`, and per audited kind
  *   `audit_<kind>_<counter>` (`need`, `have`, `downloaded`, `recomputed`, `complete`, `note`): the
  *   last audit's report. `audit_finished_at` is when the last complete one ended.
+ * - `adopted_<kind>`: "true" once an orphan sweep of that kind found none (see [com.nosfabrica.graphstreamer.relay.Audit]).
  * - `redis_reconciled_at`, `redis_keys`, `redis_replaced`, `redis_deleted`, `redis_outbox`: the last
  *   Redis reconcile (sets checked, replaced, deleted) and the authors the outbox last replayed.
  *
@@ -31,6 +32,10 @@ class Neo4jStreamerState(
     override fun lastRedisReconcileAt(): Long? = read("redis_reconciled_at")?.toLongOrNull()
 
     override fun putRedisReport(report: Map<String, String>) = write(report.mapKeys { (key, _) -> "redis_$key" })
+
+    override fun adopted(name: String): Boolean = read("adopted_$name") == "true"
+
+    override fun markAdopted(name: String) = write(mapOf("adopted_$name" to "true"))
 
     override fun putAuditReport(report: Map<String, String>) = write(report.mapKeys { (key, _) -> "audit_" + key.replace('.', '_') })
 

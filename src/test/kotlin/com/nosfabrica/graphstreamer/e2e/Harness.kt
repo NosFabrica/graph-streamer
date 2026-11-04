@@ -35,6 +35,10 @@ object E2E {
     val redisContainer = System.getenv("GS_E2E_REDIS_CONTAINER") ?: "redis-e2e"
     val python = System.getenv("GS_E2E_PYTHON") ?: "python3"
     val serverDir = System.getenv("BRAINSTORM_SERVER_DIR") ?: "../brainstorm_server"
+
+    /** A Python with brainstorm_server's dependencies, for its consumer (the migration scenario). */
+    val serverPython: String? = System.getenv("GS_E2E_SERVER_PYTHON")
+    val serverBuild: String = System.getProperty("graphstreamer.serverBuild") ?: "tools/rehearsal/server_build.py"
     val bin: String = System.getProperty("graphstreamer.bin") ?: "build/install/graph-streamer/bin/graph-streamer"
     val verify: String = System.getProperty("graphstreamer.verify") ?: "tools/verify/verify_graph.py"
 }
@@ -261,6 +265,36 @@ fun assertOracle(
     val (code, out) = oracle(relay, grace)
     println("oracle: " + out.lines().filter { it.startsWith("compared") || it.startsWith("global") || it.startsWith("checking") }.joinToString(" | "))
     assertEquals(0, code, "tools/verify found differences:\n" + out.substringAfter("compared per kind"))
+}
+
+/** [events], in this order, through brainstorm_server's own consumer into the graph's stores. */
+fun serverBuild(
+    events: List<Event>,
+    relay: LocalRelay,
+    dir: File,
+) {
+    val file = File(dir, "arrivals.jsonl")
+    file.writeText(events.joinToString("\n") { it.toJson() })
+    val p =
+        ProcessBuilder(
+            E2E.serverPython ?: error("GS_E2E_SERVER_PYTHON: a Python with brainstorm_server's dependencies"),
+            E2E.serverBuild,
+            "--server-dir",
+            File(E2E.serverDir).absolutePath,
+            "--events",
+            file.absolutePath,
+            "--neo4j",
+            E2E.neo4jUrl,
+            "--neo4j-password",
+            E2E.neo4jPassword,
+            "--redis-port",
+            E2E.redisPort.toString(),
+            "--relay",
+            relay.url,
+        ).redirectErrorStream(true).start()
+    val out = p.inputStream.bufferedReader().readText()
+    check(p.waitFor() == 0) { "server_build.py failed:\n$out" }
+    println("server build: " + out.lines().lastOrNull { it.isNotBlank() })
 }
 
 fun docker(vararg args: String) {

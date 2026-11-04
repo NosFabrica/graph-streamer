@@ -72,7 +72,7 @@ private suspend fun run(config: Config) {
 
         val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch)
         val live = LiveStream(client, relay, projector, state, config.liveOverlapSeconds, config.liveResumePointSeconds * 1000)
-        val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince)
+        val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince, state = state)
 
         if (!config.dryRun) {
             // Before anything writes: whatever a crash left between Neo4j and Redis.
@@ -121,6 +121,7 @@ private suspend fun auditForever(
             for (r in reports) {
                 fields["${r.name}.need"] = r.need.toString()
                 fields["${r.name}.have"] = r.have.toString()
+                fields["${r.name}.orphans"] = r.orphans.toString()
                 fields["${r.name}.ignored"] = r.ignored.toString()
                 fields["${r.name}.windows"] = r.windows.toString()
                 fields["${r.name}.downloaded"] = r.downloaded.toString()

@@ -5,6 +5,7 @@ import com.nosfabrica.graphstreamer.store.AuthorChange
 import com.nosfabrica.graphstreamer.store.AuthorSource
 import com.nosfabrica.graphstreamer.store.EdgeChange
 import com.nosfabrica.graphstreamer.store.GraphStore
+import com.nosfabrica.graphstreamer.store.IncompleteRead
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.nosfabrica.graphstreamer.store.RedisRepair
 import kotlinx.coroutines.runBlocking
@@ -54,10 +55,34 @@ class Projector(
         lock.withLock {
             val current = graph.read(byAuthor.keys.toList())
             val now = clock()
+            // A report adds its targets to the ones held, which is right only if the held ones are
+            // ours. Report edges with no report ids came from another writer (the server's
+            // consumer, before cutover), so that author is rebuilt from the relay instead.
+            val adopting =
+                byAuthor.filter { (author, mine) ->
+                    val held = current[author]
+                    held != null && held.reports.isEmpty() && held.edges(Edge.REPORTS).isNotEmpty() && mine.any { it.kind == RelayFilters.REPORTS }
+                }.keys
+            val fromRelay =
+                if (adopting.isEmpty()) {
+                    emptyMap()
+                } else {
+                    try {
+                        source.currentEvents(adopting.toList()).groupBy { it.pubKey }.let { relay -> adopting.associateWith { relay[it].orEmpty() } }
+                    } catch (e: IncompleteRead) {
+                        // Not recorded, so the audit downloads them again and this is retried.
+                        log.warn("adopting {} authors' reports: the relay did not drain; left for the next audit", adopting.size)
+                        null
+                    }
+                }
             commit(
                 byAuthor.mapNotNull { (author, mine) ->
                     val held = current[author] ?: AuthorState()
-                    val target = GraphRules.apply(author, held, mine, now)
+                    if (author in adopting && fromRelay == null) {
+                        mine.forEach { ignored += Ignored(it, "its author's reports could not be read back") }
+                        return@mapNotNull null
+                    }
+                    val target = fromRelay?.get(author)?.let { GraphRules.fromRelay(author, it, now) } ?: GraphRules.apply(author, held, mine, now)
                     for (e in mine) {
                         val recorded = target.heads.values.any { it.id == e.id } || e.id in target.reports
                         if (!recorded) ignored += Ignored(e, GraphRules.whyNotRecorded(e, held, now))

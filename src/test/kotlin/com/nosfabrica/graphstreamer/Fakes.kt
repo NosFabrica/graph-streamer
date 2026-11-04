@@ -33,6 +33,14 @@ class FakeState : StreamerState {
         audit.putAll(report)
     }
 
+    val adopted = mutableSetOf<String>()
+
+    override fun adopted(name: String) = name in adopted
+
+    override fun markAdopted(name: String) {
+        adopted += name
+    }
+
     val redis = mutableMapOf<String, String>()
 
     override fun lastRedisReconcileAt() = redis["reconciled_at"]?.toLong()
@@ -93,6 +101,14 @@ class FakeGraph : GraphStore {
     override fun reports() = authors.flatMap { (a, s) -> s.reports.map { (id, at) -> a to IdAndTime(at, id) } }
 
     override fun ensureIndexes() = Unit
+
+    override fun orphanAuthors(
+        edge: Edge,
+        limit: Int,
+    ): List<String> {
+        val kind = ListKind.entries.firstOrNull { it.edge == edge }
+        return authors.filterValues { s -> s.edges(edge).isNotEmpty() && (if (kind != null) s.heads[kind] == null else s.reports.isEmpty()) }.keys.take(limit)
+    }
 
     override fun repairPendingRedis() = 0
 

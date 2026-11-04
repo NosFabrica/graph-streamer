@@ -188,6 +188,7 @@ def main():
 
     if not args.skip_global:
         global_counts(driver, r, problem)
+        orphans(driver, problem)
 
     print("\nresult:", "OK, nothing differs" if not problems else "DIFFERENCES")
     for kind, n in problems.most_common():
@@ -276,6 +277,18 @@ async def check(args, p_tags, report_targets, designated, driver, r, now, horizo
                     problem(label, detail)
             print(f"  {min(i + 100, len(authors))}/{len(authors)} authors", end="\r", flush=True)
         print(f"\ncompared per kind: {dict(compared)}")
+
+
+def orphans(driver, problem):
+    """Authors with edges of a kind and no bookkeeping for it: edges no audit compares (another
+    writer's, or a migration not finished). graph-streamer's own edges always have bookkeeping."""
+    checks = {"FOLLOWS": "u.follows_event IS NULL", "MUTES": "u.mutes_event IS NULL", "DESIGNATES": "u.designations_event IS NULL", "REPORTS": "u.report_events IS NULL"}
+    with driver.session() as s:
+        for rel, unrecorded in checks.items():
+            rows = s.run(f"MATCH (u:NostrUser) WHERE {unrecorded} AND EXISTS {{ (u)-[:{rel}]->() }} RETURN u.pubkey AS a LIMIT 1000").value()
+            print(f"orphans {rel}: {len(rows):,}{'+' if len(rows) == 1000 else ''} authors with edges and no bookkeeping")
+            for a in rows:
+                problem(f"orphan: {rel} edges with no bookkeeping", a)
 
 
 def global_counts(driver, r, problem):

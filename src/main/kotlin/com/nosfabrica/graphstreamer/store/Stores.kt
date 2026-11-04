@@ -28,6 +28,11 @@ interface StreamerState {
     fun lastRedisReconcileAt(): Long?
 
     fun putRedisReport(report: Map<String, String>)
+
+    /** Whether a sweep of [name] (an audited kind) found no orphan: every edge of it is ours. */
+    fun adopted(name: String): Boolean
+
+    fun markAdopted(name: String)
 }
 
 /** One author's edges of one type moving from what the graph holds to what their events say. */
@@ -83,6 +88,15 @@ interface GraphStore {
 
     /** Creates the pubkey constraint every write merges on, and the indexes the audit reads lists through. */
     fun ensureIndexes()
+
+    /**
+     * Authors with outgoing [edge] edges and no bookkeeping for them (no list head; for reports,
+     * no report ids): edges another writer made, which no audit compares. At most [limit].
+     */
+    fun orphanAuthors(
+        edge: Edge,
+        limit: Int,
+    ): List<String>
 
     /** Replays the Redis writes a crash cut off (the outbox); returns how many authors. */
     fun repairPendingRedis(): Int

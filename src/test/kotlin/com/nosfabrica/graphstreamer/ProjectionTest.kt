@@ -1,5 +1,6 @@
 package com.nosfabrica.graphstreamer
 
+import com.nosfabrica.graphstreamer.projection.AuthorState
 import com.nosfabrica.graphstreamer.projection.Edge
 import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.projection.Projector
@@ -46,6 +47,23 @@ class ProjectionTest {
             assertEquals(setOf(hex(1), hex(2)), graph.edges(alice.pubkey, Edge.FOLLOWS))
             assertEquals(list.id, graph.authors[alice.pubkey]?.heads?.get(ListKind.FOLLOWS)?.id)
             assertEquals(0, relay.reads)
+        }
+
+    @Test
+    fun aReportOnServerBuiltReportEdgesRebuildsTheAuthorFromTheRelay() =
+        runTest {
+            // The server's consumer left alice -[:REPORTS]-> hex(1), with no report ids: the report
+            // behind it is gone from the relay. A new report must not keep it.
+            graph.authors[alice.pubkey] = AuthorState(edges = mapOf(Edge.REPORTS to setOf(hex(1))))
+            val report = alice.event(1984, listOf(listOf("p", hex(2))), createdAt = t0)
+            arrive(report)
+            assertEquals(setOf(hex(2)), graph.edges(alice.pubkey, Edge.REPORTS))
+            assertEquals(setOf(report.id), graph.authors[alice.pubkey]?.reports?.keys)
+            assertEquals(1, relay.reads, "read back from the relay once")
+            // From then on the edges are ours: the next report adds, with no read.
+            arrive(alice.event(1984, listOf(listOf("p", hex(3))), createdAt = t0 + 1))
+            assertEquals(setOf(hex(2), hex(3)), graph.edges(alice.pubkey, Edge.REPORTS))
+            assertEquals(1, relay.reads)
         }
 
     @Test

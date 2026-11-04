@@ -171,6 +171,9 @@ class EndToEndTest {
         val corpus = Corpus()
         rebuild(corpus.events)
         Thread.sleep(2_500) // past one resume-point save
+        // Nothing streamed yet (the corpus went straight into the relay's store): the point to
+        // resume from is still where the stream started.
+        assertTrue(stores.state()["live_since"] != null, "no resume point saved: ${stores.state()}")
         streamer.stop()
         val a = corpus.signers[12]
         val list = a.event(3, pTags(4))
@@ -309,6 +312,64 @@ class EndToEndTest {
         val state = stores.state()
         assertTrue((state["redis_replaced"] as String).toLong() >= 59, "$state")
         assertTrue((state["redis_deleted"] as String).toLong() >= 2, "$state")
+        assertOracle(relay)
+    }
+
+    /**
+     * Production's graph today: built by the server's consumer from the firehose, in arrival
+     * order. Older list versions arriving after newer ones (it applies whatever comes last),
+     * lists and reports the relay no longer holds or never had, list deletions it never applied.
+     * graph-streamer then takes over that Neo4j and Redis; afterwards the graph must be exactly
+     * the relay's, with no edge left that no audit compares.
+     */
+    @Test
+    fun aServerBuiltGraphMigrates() {
+        assumeTrue(E2E.serverPython != null, "GS_E2E_SERVER_PYTHON runs the migration scenario")
+        val arrivals = ArrayList<Event>()
+        val onRelay = ArrayList<Event>()
+        val authors = List(150) { Signer() }
+        authors.forEachIndexed { i, s ->
+            val old = s.event(3, pTags(rnd.nextInt(5, 80)), past(60) - 86_400 * 60)
+            val new = s.event(3, pTags(rnd.nextInt(5, 80)), past())
+            when (i % 6) {
+                0 -> { arrivals += new; arrivals += old; onRelay += new } // the old one arrived last: the server holds it
+                1 -> { arrivals += old; arrivals += new; onRelay += new }
+                2 -> { arrivals += new } // the relay never had it: an orphan
+                3 -> { arrivals += new; onRelay += new; onRelay += s.event(5, listOf(listOf("e", new.id), listOf("k", "3")), now - 3_600 * 3) } // deleted on the relay
+                else -> { arrivals += new; onRelay += new }
+            }
+            if (i % 3 == 0) {
+                val mutes = s.event(10000, pTags(rnd.nextInt(1, 20)), past())
+                arrivals += mutes
+                if (i % 2 == 0) onRelay += mutes // half of them gone from the relay
+            }
+            if (i % 5 == 0) {
+                val kept = s.event(1984, listOf(listOf("p", targets.random(rnd))), past())
+                val gone = s.event(1984, listOf(listOf("p", targets.random(rnd))), past())
+                arrivals += kept
+                arrivals += gone // the relay never had this one
+                onRelay += kept
+            }
+            if (i % 10 == 0) {
+                val d = s.event(10040, listOf(listOf("30382:rank", targets.random(rnd))), past())
+                arrivals += d
+                if (i % 20 == 0) onRelay += d
+            }
+        }
+        relay.load(onRelay)
+        serverBuild(arrivals, relay, dir)
+        assertTrue(stores.count("MATCH ()-[r:FOLLOWS]->() RETURN count(r)") > 0, "the server built a graph")
+        assertNotEquals(0, oracle(relay).first, "the server-built graph differs from the relay")
+
+        val started = System.currentTimeMillis() / 1000
+        streamer.start()
+        val first = stores.awaitAudit(started, streamer = streamer)
+        assertEquals("true", first["audit_complete"], "$first")
+        // The second audit finds no orphan left, and marks every kind adopted.
+        val second = audit()
+        assertEquals("true", second["audit_complete"], "$second")
+        for (kind in listOf("follows", "mutes", "designations", "reports")) assertEquals("true", second["adopted_$kind"], "$kind: $second")
+        waitFor(120, "the Redis reconcile") { (stores.state()["redis_reconciled_at"] as? String)?.toLong()?.let { it >= started } ?: false }
         assertOracle(relay)
     }
 

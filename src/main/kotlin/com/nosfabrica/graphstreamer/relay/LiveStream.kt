@@ -59,11 +59,12 @@ class LiveStream(
         coroutineScope {
             val inbox = Channel<Event>(INBOX)
             val caughtUp = CaughtUpResume(nowInSeconds = clock)
+            val startedFrom = state.liveSince() ?: (clock() - overlapSeconds)
             launch {
                 client
                     .subscribeEvents(
                         relay = relay,
-                        filters = RelayFilters.live(since = state.liveSince() ?: (clock() - overlapSeconds)),
+                        filters = RelayFilters.live(since = startedFrom),
                         resume = if (overlapSeconds == 0L) caughtUp else Overlap(caughtUp, overlapSeconds),
                     ).collect { inbox.send(it) }
             }
@@ -72,7 +73,10 @@ class LiveStream(
                 var saved: Long? = null
                 while (isActive) {
                     delay(resumePointIntervalMs)
-                    val point = caughtUp.caughtUpAt(relay)?.minus(overlapSeconds) ?: continue
+                    // Before the first live event there is no point of the relay's: the stream's
+                    // own start is one, and missing it would start a restart from now, leaving
+                    // whatever arrived while the process was down to the next audit.
+                    val point = caughtUp.caughtUpAt(relay)?.minus(overlapSeconds) ?: startedFrom
                     if (point != saved) {
                         state.putLiveSince(point)
                         saved = point

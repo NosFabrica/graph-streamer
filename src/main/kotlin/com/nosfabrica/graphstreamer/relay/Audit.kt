@@ -1,9 +1,11 @@
 package com.nosfabrica.graphstreamer.relay
 
 import com.nosfabrica.graphstreamer.RelayFilters
+import com.nosfabrica.graphstreamer.projection.Edge
 import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.projection.Projector
 import com.nosfabrica.graphstreamer.store.GraphStore
+import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.NegentropyLocalIndex
@@ -51,6 +53,8 @@ class Audit(
     private val since: Long? = null,
     private val idleTimeoutMs: Long = 120_000,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
+    /** Where the orphan sweep records that a kind is adopted; null: never sweep. */
+    private val state: StreamerState? = null,
 ) {
     private val log = LoggerFactory.getLogger(Audit::class.java)
 
@@ -58,6 +62,8 @@ class Audit(
         val name: String,
         val need: Int,
         val have: Int,
+        /** Authors with this kind's edges and no bookkeeping, found by the sweep (-1: not swept). */
+        val orphans: Int,
         /** Downloaded and not recorded: the next audit downloads these again. */
         val ignored: Int,
         val windows: Int,
@@ -69,7 +75,46 @@ class Audit(
 
     suspend fun run(): List<Report> {
         val until = clock() - graceSeconds
-        return ListKind.entries.map { auditList(it, until) } + auditReports(until)
+        return ListKind.entries.map { sweep(auditList(it, until), it.edge) } + sweep(auditReports(until), Edge.REPORTS)
+    }
+
+    /**
+     * After a complete reconcile, the authors with [edge] edges and no bookkeeping: edges another
+     * writer made (the server's consumer, before cutover) that no audit compares, because the
+     * relay holds no event for them or the graph never recorded one. Each is rebuilt from the
+     * relay, behind the same guard as absences. A sweep that finds none marks the kind adopted:
+     * from then on every edge of it has bookkeeping, and the sweep, a full scan, stops. Not with
+     * AUDIT_SINCE, where an author without bookkeeping may only have an older list. A dry run
+     * counts and changes nothing.
+     */
+    private suspend fun sweep(
+        report: Report,
+        edge: Edge,
+    ): Report {
+        if (state == null || since != null || !report.complete || (!dryRun && state.adopted(report.name))) return report
+        val cap = guard.maxAbsent
+        val orphans = graph.orphanAuthors(edge, if (cap > 0) cap + 1 else Int.MAX_VALUE)
+        if (dryRun) return report.copy(orphans = orphans.size)
+        if (orphans.isEmpty()) {
+            state.markAdopted(report.name)
+            return report.copy(orphans = 0)
+        }
+        if (cap in 1 until orphans.size) {
+            val note = "more than $cap authors have ${edge.relType} edges and no bookkeeping; raise AUDIT_MAX_DELETES to rebuild them"
+            log.warn("audit {}: {}", report.name, note)
+            return report.copy(orphans = orphans.size, note = listOfNotNull(report.note, note).joinToString("; "))
+        }
+        var recomputed = 0
+        try {
+            for (batch in orphans.chunked(projector.batchSize)) recomputed += projector.recompute(batch)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("audit {}: orphan rebuild stopped after {}", report.name, recomputed, e)
+            return report.copy(orphans = orphans.size, recomputed = report.recomputed + recomputed, note = listOfNotNull(report.note, "orphan rebuild stopped after $recomputed").joinToString("; "))
+        }
+        log.info("audit {}: rebuilt {} authors with edges and no bookkeeping", report.name, recomputed)
+        return report.copy(orphans = orphans.size, recomputed = report.recomputed + recomputed)
     }
 
     private suspend fun auditList(
@@ -164,7 +209,7 @@ class Audit(
                 verdict.reason.takeIf { haves.isNotEmpty() && !verdict.act },
                 recomputeFailure?.let { "recompute stopped after $recomputed ($it); the rest wait for the next audit" },
             ).joinToString("; ").ifEmpty { null }
-        val report = Report(name, need, haves.size, ignored, windows, downloaded, recomputed, complete = failure == null && !unreconciled && windows > 0, note = note)
+        val report = Report(name, need, haves.size, -1, ignored, windows, downloaded, recomputed, complete = failure == null && !unreconciled && windows > 0, note = note)
         log.info("audit {}", report)
         return report
     }
@@ -215,7 +260,7 @@ class Audit(
  * just delivered may not be visible to the relay's id reads yet.
  */
 class AbsenceGuard(
-    private val maxAbsent: Int,
+    val maxAbsent: Int,
 ) {
     data class Verdict(
         val act: Boolean,
