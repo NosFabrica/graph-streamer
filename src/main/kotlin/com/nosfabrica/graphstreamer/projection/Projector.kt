@@ -40,22 +40,39 @@ class Projector(
     val edgesAdded = Edge.entries.associateWith { AtomicLong() }
     val edgesRemoved = Edge.entries.associateWith { AtomicLong() }
 
-    suspend fun apply(events: List<Event>) {
+    /**
+     * Applies [events]; returns the ones the graph did not record, with why: an audit downloads
+     * those again every time, so it counts them.
+     */
+    suspend fun apply(events: List<Event>): List<Ignored> {
         val graphEvents = events.filter { it.kind in RelayFilters.GRAPH_KINDS }.distinctBy { it.id }
-        if (graphEvents.isEmpty()) return
+        if (graphEvents.isEmpty()) return emptyList()
         val byAuthor = graphEvents.groupBy { it.pubKey }
+        val ignored = ArrayList<Ignored>()
         lock.withLock {
             val current = graph.read(byAuthor.keys.toList())
             val now = clock()
             commit(
                 byAuthor.mapNotNull { (author, mine) ->
                     val held = current[author] ?: AuthorState()
-                    change(author, held, GraphRules.apply(author, held, mine, now))
+                    val target = GraphRules.apply(author, held, mine, now)
+                    for (e in mine) {
+                        val recorded = target.heads.values.any { it.id == e.id } || e.id in target.reports
+                        if (!recorded) ignored += Ignored(e, GraphRules.whyNotRecorded(e, held, now))
+                    }
+                    change(author, held, target)
                 },
             )
             eventsApplied.addAndGet(graphEvents.size.toLong())
         }
+        return ignored
     }
+
+    /** An event [apply] did not record. */
+    data class Ignored(
+        val event: Event,
+        val reason: String,
+    )
 
     /**
      * Rebuilds [authors] (at most [batchSize]) from what the relay holds for them now; returns how

@@ -58,6 +58,9 @@ class Audit(
         val name: String,
         val need: Int,
         val have: Int,
+        /** Downloaded and not recorded: the next audit downloads these again. */
+        val ignored: Int,
+        val windows: Int,
         val downloaded: Int,
         val recomputed: Int,
         val complete: Boolean,
@@ -97,6 +100,7 @@ class Audit(
         var failure: String? = null
         var need = 0
         var windows = 0
+        var ignored = 0
 
         try {
             val result =
@@ -114,7 +118,16 @@ class Audit(
                     onHaveIds = { ids -> haves.addAll(ids) },
                     onNeedIds = { ids ->
                         val events = client.fetchByIds(relay, ids, idleTimeoutMs, reconciledFrom = filter)
-                        projector.apply(events)
+                        val notRecorded = projector.apply(events)
+                        if (notRecorded.isNotEmpty()) {
+                            ignored += notRecorded.size
+                            log.info(
+                                "audit {}: {} downloaded events not recorded, e.g. {}",
+                                name,
+                                notRecorded.size,
+                                notRecorded.take(5).joinToString { "${it.event.id} (${it.reason})" },
+                            )
+                        }
                         downloaded += events.size
                     },
                 )
@@ -151,7 +164,7 @@ class Audit(
                 verdict.reason.takeIf { haves.isNotEmpty() && !verdict.act },
                 recomputeFailure?.let { "recompute stopped after $recomputed ($it); the rest wait for the next audit" },
             ).joinToString("; ").ifEmpty { null }
-        val report = Report(name, need, haves.size, downloaded, recomputed, complete = failure == null && !unreconciled && windows > 0, note = note)
+        val report = Report(name, need, haves.size, ignored, windows, downloaded, recomputed, complete = failure == null && !unreconciled && windows > 0, note = note)
         log.info("audit {}", report)
         return report
     }

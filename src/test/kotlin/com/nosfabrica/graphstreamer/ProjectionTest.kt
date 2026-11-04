@@ -49,6 +49,18 @@ class ProjectionTest {
         }
 
     @Test
+    fun applyReportsWhatItDidNotRecord() =
+        runTest {
+            val newer = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0 + 10)
+            val older = alice.event(3, listOf(listOf("p", hex(9))), createdAt = t0)
+            val report = alice.event(1984, listOf(listOf("p", hex(5))), createdAt = t0)
+            assertEquals(emptyList(), projector().apply(listOf(newer, report)))
+            val ignored = projector().apply(listOf(older, report))
+            assertEquals(listOf(older.id), ignored.map { it.event.id }, "a report already recorded is recorded, not ignored")
+            assertTrue(ignored.single().reason.startsWith("the graph holds a newer list"), ignored.single().reason)
+        }
+
+    @Test
     fun aNewerListReplacesTheOldOneAndAnOlderOneChangesNothing() =
         runTest {
             arrive(alice.event(3, listOf(listOf("p", hex(1)), listOf("p", hex(2))), createdAt = t0 + 10))

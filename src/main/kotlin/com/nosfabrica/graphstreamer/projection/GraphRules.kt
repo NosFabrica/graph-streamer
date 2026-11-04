@@ -158,6 +158,18 @@ object GraphRules {
         return AuthorState(edges, heads, reports)
     }
 
+    /** Why [apply] would not record [event] on top of [held]; for logs. */
+    fun whyNotRecorded(
+        event: Event,
+        held: AuthorState,
+        now: Long,
+    ): String {
+        if (isExpired(event, now)) return "expired at ${event.expiration()}"
+        val kind = ListKind.entries.firstOrNull { it.kind == event.kind } ?: return "superseded in the same batch"
+        val head = held.heads[kind] ?: return "superseded in the same batch"
+        return if (!isNewer(event, head)) "the graph holds a newer list (${head.createdAt} ${head.id.take(12)} vs ${event.createdAt})" else "superseded in the same batch"
+    }
+
     /**
      * What [author] should have, given everything the relay holds for them now. The relay has
      * already applied deletions, vanishes and expiries, so what it serves is what survives.

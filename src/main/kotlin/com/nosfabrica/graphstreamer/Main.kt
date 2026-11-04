@@ -113,6 +113,8 @@ private suspend fun auditForever(
             for (r in reports) {
                 fields["${r.name}.need"] = r.need.toString()
                 fields["${r.name}.have"] = r.have.toString()
+                fields["${r.name}.ignored"] = r.ignored.toString()
+                fields["${r.name}.windows"] = r.windows.toString()
                 fields["${r.name}.downloaded"] = r.downloaded.toString()
                 fields["${r.name}.recomputed"] = r.recomputed.toString()
                 fields["${r.name}.complete"] = r.complete.toString()
