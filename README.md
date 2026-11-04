@@ -185,10 +185,34 @@ relay. Set `AUDIT_EVERY_HOURS` high, or to 0, after the first one.
 3. Retire neofry's router streams and the transferer, along with `kind3Backfill`, `reportBackfill`
    and `neofryResync`. Kind 39999 is still open.
 
+## Rehearsal (2026-11-04)
+
+The real service against search.brainstorm.world, `DRY_RUN=false`, `AUDIT_SINCE` = 2026-01-01,
+into an empty Neo4j 5 (heap 3G, page cache 4G) and Redis 7 on a 4-core, 16 GB machine. One
+slice, one run each; production's graph is about ten times larger.
+
+| | measured |
+|---|---|
+| first audit, follows | ~460k lists → 27.6M FOLLOWS edges, 720k users. 14k edges/s on small lists, 30k/s on lists of thousands. About 330 lists/s while fetching. |
+| first audit, others | mutes 21,556 lists, designations 931, reports 109,334: seconds to a minute each |
+| storage | Neo4j store 55 B/edge, transaction logs 126 B/edge (default retention, 2 days), Redis sets 97 B/member, nothing evicted |
+| second audit, all kinds | 13 s (`AUDIT_WINDOW` 200,000 or 1,000,000: 5 or 1 windows), 17 s (50,000: 27 windows), 25 s (10,000: 101 windows). No window refused, 460k lists in one included. |
+| Neo4j side of the audit | 8.46M synthetic lists: 24–30 s whatever the window size, ~350k pairs/s (`AuditLocalSideBenchmark`) |
+
+What the rehearsal found:
+
+- MERGE on edges was quadratic in a list's length; one batch of 500 large lists held a
+  transaction for over five minutes. New edges are now created once per author.
+- The relay reset the connection once mid-reconcile (about five minutes unanswered). That kind
+  was reported incomplete, nothing was paged, and the retry was a delta.
+- The relay holds two kind-3s for some authors (about 35 in the slice), and serves both by id and
+  by author. The older is downloaded and not recorded on every audit (`<kind>.ignored`); the newer
+  wins, so the graph is right. A relay bug, not ours.
+
 ## Not measured yet
 
-- The first audit downloads every follow list the relay holds, by id, through the relay. Its
-  load on Vespa, and how long it takes, are unknown. Run it when the content nodes have headroom.
-- Whether vespa-relay reconciles a one-kind NEG-OPEN at this size without windows being refused.
-  Refused windows are paged, which fills the graph but can't detect deletions.
-- The cost of the bookkeeping writes on top of the edge writes, and of the six range indexes.
+- The first audit over the whole corpus: from the slice, ~220–275M FOLLOWS edges, ~14 GB of
+  store, ~30 GB of transaction logs and ~22–27 GB of Redis sets, about seven to nine hours. That
+  Redis figure is at production's `maxmemory 24gb` (allkeys-lru), where an evicted
+  `followed_by:` set reads as empty to GrapeRank. Check production's `used_memory` first.
+- Its load on Vespa. Run it when the content nodes have headroom.
