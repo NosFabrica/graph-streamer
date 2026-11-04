@@ -309,7 +309,19 @@ def global_counts(driver, r, problem):
             for k in keys[i : i + 10000]:
                 pipe.scard(prefix + k)
             sizes.update(zip(keys[i : i + 10000], pipe.execute()))
-        wrong = [(k, degrees[k], sizes[k]) for k in keys if degrees[k] != sizes[k]]
+        # The pass reads Neo4j first and Redis after, so on a graph being written a key can look
+        # wrong for one write. Re-read each suspect, both sides back to back, before calling it.
+        wrong = []
+        for k in (k for k in keys if degrees[k] != sizes[k]):
+            for attempt in range(3):
+                with driver.session() as s:
+                    n = s.run(f"MATCH (u:NostrUser {{pubkey: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=k).single()["n"]
+                c = r.scard(prefix + k)
+                if n == c:
+                    break
+                time.sleep(2)
+            else:
+                wrong.append((k, n, c))
         orphan_sets = 0
         for key in r.scan_iter(match=prefix + "*", count=10000):
             if key[len(prefix) :] not in degrees:
