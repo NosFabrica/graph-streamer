@@ -17,10 +17,35 @@ import org.neo4j.driver.Driver
  *
  * Written in a dry run too: it is not the graph, and without it every restart would run a full
  * dry-run audit, which downloads the relay's whole set.
+ *
+ * Its loops (the live stream's resume point, the audit, the Redis reconcile) write it at once, and
+ * a MERGE is atomic only under a uniqueness constraint: without one, two first writes made two
+ * nodes, and the schedule read the one without `audit_finished_at` and audited again. The
+ * constraint is created before the first write, in a dry run too (the label is ours, not the
+ * graph's), after folding any duplicates an earlier version left into one.
  */
 class Neo4jStreamerState(
     private val driver: Driver,
 ) : StreamerState {
+    @Volatile private var constrained = false
+    private val constraining = Any()
+
+    private fun ensureConstraint() {
+        if (constrained) return
+        synchronized(constraining) {
+            if (constrained) return
+            driver.session().use { s ->
+                // The node with the most properties is the one that was written to longest.
+                s.run(
+                    "MATCH (s:$LABEL) WITH s.name AS name, s ORDER BY size(keys(s)) DESC " +
+                        "WITH name, collect(s) AS nodes WHERE size(nodes) > 1 " +
+                        "UNWIND nodes[1..] AS extra DETACH DELETE extra",
+                ).consume()
+                s.run("CREATE CONSTRAINT graph_streamer_state_name IF NOT EXISTS FOR (s:$LABEL) REQUIRE s.name IS UNIQUE").consume()
+            }
+            constrained = true
+        }
+    }
     override fun lastAuditFinishedAt(): Long? = read("audit_finished_at")?.toLongOrNull()
 
     override fun lastAuditEndedAt(): Long? = read("audit_ended_at")?.toLongOrNull()
@@ -54,6 +79,7 @@ class Neo4jStreamerState(
 
     /** Every value is a string: two numbers and a report, read back the way they were written. */
     private fun write(properties: Map<String, String>) {
+        ensureConstraint()
         driver.session().use { session ->
             session.executeWriteWithoutResult { tx ->
                 tx.run("MERGE (s:$LABEL {name: \$name}) SET s += \$properties", mapOf("name" to NAME, "properties" to properties)).consume()
