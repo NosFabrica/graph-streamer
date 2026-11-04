@@ -7,6 +7,7 @@ import com.nosfabrica.graphstreamer.store.AuthorChange
 import com.nosfabrica.graphstreamer.store.AuthorSource
 import com.nosfabrica.graphstreamer.store.GraphStore
 import com.nosfabrica.graphstreamer.store.IncompleteRead
+import com.nosfabrica.graphstreamer.store.RedisRepair
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
@@ -30,6 +31,14 @@ class FakeState : StreamerState {
 
     override fun putAuditReport(report: Map<String, String>) {
         audit.putAll(report)
+    }
+
+    val redis = mutableMapOf<String, String>()
+
+    override fun lastRedisReconcileAt() = redis["reconciled_at"]?.toLong()
+
+    override fun putRedisReport(report: Map<String, String>) {
+        redis.putAll(report)
     }
 }
 
@@ -84,6 +93,10 @@ class FakeGraph : GraphStore {
     override fun reports() = authors.flatMap { (a, s) -> s.reports.map { (id, at) -> a to IdAndTime(at, id) } }
 
     override fun ensureIndexes() = Unit
+
+    override fun repairPendingRedis() = 0
+
+    override fun reconcileRedis(underLock: (() -> Unit) -> Unit) = RedisRepair(0, 0, 0)
 }
 
 /** The relay: what it serves for an author is whatever this holds (deletions already applied). */

@@ -23,6 +23,11 @@ interface StreamerState {
     fun putLiveSince(since: Long)
 
     fun putAuditReport(report: Map<String, String>)
+
+    /** When Redis was last reconciled with Neo4j, epoch seconds. */
+    fun lastRedisReconcileAt(): Long?
+
+    fun putRedisReport(report: Map<String, String>)
 }
 
 /** One author's edges of one type moving from what the graph holds to what their events say. */
@@ -78,7 +83,23 @@ interface GraphStore {
 
     /** Creates the pubkey constraint every write merges on, and the indexes the audit reads lists through. */
     fun ensureIndexes()
+
+    /** Replays the Redis writes a crash cut off (the outbox); returns how many authors. */
+    fun repairPendingRedis(): Int
+
+    /**
+     * Makes every Redis set match Neo4j: [underLock] runs each batch's compare-and-replace under
+     * the writer's lock, so a set is never replaced with members a concurrent write just changed.
+     */
+    fun reconcileRedis(underLock: (() -> Unit) -> Unit): RedisRepair
 }
+
+/** What [GraphStore.reconcileRedis] did: keys checked, sets replaced, sets deleted (no edge left). */
+data class RedisRepair(
+    val keys: Long,
+    val replaced: Long,
+    val deleted: Long,
+)
 
 /** The relay, read by author. */
 interface AuthorSource {

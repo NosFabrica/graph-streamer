@@ -26,6 +26,9 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    // The end-to-end suite's relay: Quartz's NostrServer over its SQLite store, served by Ktor.
+    testImplementation("io.ktor:ktor-server-cio:3.6.1")
+    testImplementation("io.ktor:ktor-server-websockets:3.6.1")
 }
 
 kotlin {
@@ -38,4 +41,23 @@ application {
 
 tasks.test {
     useJUnitPlatform()
+    exclude("**/e2e/**")
+}
+
+/**
+ * The end-to-end suite (src/test/.../e2e): the installed service against a local relay, Neo4j
+ * and Redis, checked by tools/verify. Needs Docker containers (see E2E.md); not part of `test`.
+ */
+tasks.register<Test>("e2eTest") {
+    description = "End-to-end scenarios against a local relay, Neo4j and Redis."
+    group = "verification"
+    useJUnitPlatform()
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    include("**/e2e/**")
+    dependsOn("installDist")
+    systemProperty("graphstreamer.bin", layout.buildDirectory.file("install/graph-streamer/bin/graph-streamer").get().asFile.absolutePath)
+    systemProperty("graphstreamer.verify", layout.projectDirectory.file("tools/verify/verify_graph.py").asFile.absolutePath)
+    maxParallelForks = 1
+    testLogging { events("passed", "failed", "skipped"); showStandardStreams = true; exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
 }

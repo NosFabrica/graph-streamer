@@ -116,7 +116,9 @@ class Relay:
 
 
 async def sample_relay_authors(relay, kind, since, until, n, per=200):
-    """Authors of [kind] events at random points in [since, until]."""
+    """Authors of [kind] events at random points in [since, until]; n = 0: every author."""
+    if n == 0:
+        return list({e["pubkey"] for e in await relay.req({"kinds": [kind], "until": until, "limit": 5000})})
     authors = set()
     tries = 0
     while len(authors) < n and tries < n:
@@ -162,7 +164,7 @@ def main():
     ap.add_argument("--since", type=int, default=0, help="the AUDIT_SINCE the graph was built with")
     ap.add_argument("--grace", type=int, default=7200, help="ignore events newer than now - grace (not audited yet)")
     ap.add_argument("--graph-sample", type=int, default=1000)
-    ap.add_argument("--relay-sample", type=int, default=500, help="per kind")
+    ap.add_argument("--relay-sample", type=int, default=500, help="authors per kind; 0 = every author the relay holds (small relays only)")
     ap.add_argument("--skip-global", action="store_true", help="skip the whole-graph Redis/Neo4j count check")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--author", action="append", default=[], help="also check this author (repeatable)")
@@ -208,7 +210,7 @@ async def check(args, p_tags, report_targets, designated, driver, r, now, horizo
     async with Relay(args.relay) as relay:
         relay_authors = set()
         for kind in (3, 10000, 10040, REPORTS):
-            got = await sample_relay_authors(relay, kind, max(args.since, 1609459200), horizon, args.relay_sample)
+            got = await sample_relay_authors(relay, kind, max(args.since, 1609459200), now, args.relay_sample)
             print(f"relay sample kind {kind}: {len(got)} authors")
             relay_authors.update(got)
         authors = list(set(graph_authors) | relay_authors | set(args.author))

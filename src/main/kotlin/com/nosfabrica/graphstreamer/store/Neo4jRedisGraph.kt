@@ -8,6 +8,7 @@ import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
 import org.neo4j.driver.Driver
 import org.neo4j.driver.TransactionContext
 import redis.clients.jedis.JedisPool
+import redis.clients.jedis.params.ScanParams
 
 /**
  * The graph as brainstorm_server has kept it: `(:NostrUser {pubkey})` nodes with outgoing
@@ -19,6 +20,18 @@ import redis.clients.jedis.JedisPool
  * `follows_event`/`follows_at`, `mutes_event`/`mutes_at`, `designations_event`/`designations_at`
  * (the list the edges came from) and `report_events` (every report of theirs, `"<created_at>:<id>"`).
  * Edges and bookkeeping are written in one transaction, so they can't disagree; Redis after.
+ *
+ * Redis can still fall behind Neo4j: a crash between the commit and the Redis write, an eviction
+ * (production runs allkeys-lru), a Redis that came up empty, or drift inherited from the server's
+ * consumer. Two repairs, both from Neo4j, which is what Redis copies:
+ *
+ * - **The outbox.** The transaction that writes an author's edges also labels them
+ *   `GraphStreamerRedisPending` and records the targets they lost (`redis_pending_removed`). The
+ *   label goes once Redis has the change. [repairPendingRedis] replays whoever still has it: their
+ *   current targets added, the recorded ones removed. Exact, and only for the authors a crash caught.
+ * - **The reconcile.** [reconcileRedis] compares every set's size with its key's edge count in
+ *   Neo4j, replaces the sets that differ, and deletes the sets whose key has no edge. A batch at a
+ *   time, under the caller's lock.
  *
  * Relationship types and property names come from [Edge] and [ListKind], never from data: a
  * fixed set of query texts, so Neo4j caches a fixed set of plans. Writes are managed
@@ -62,14 +75,177 @@ class Neo4jRedisGraph(
 
     override fun write(changes: List<AuthorChange>) {
         if (changes.isEmpty()) return
+        val pending = changes.filter { it.edges.isNotEmpty() }.map { c -> mapOf("author" to c.author, "removed" to c.edges.flatMap { e -> e.removed.map { "${e.edge.relType}|$it" } }) }
         driver.session().use { session ->
             session.executeWrite { tx ->
                 for ((edge, rows) in changes.flatMap { it.edges }.groupBy { it.edge }) writeEdges(tx, edge, rows)
                 val bookkeeping = changes.filter { it.bookkeepingChanged }.map(::bookkeepingRow)
                 if (bookkeeping.isNotEmpty()) tx.run(WRITE_BOOKKEEPING, mapOf("rows" to bookkeeping))
+                if (pending.isNotEmpty()) tx.run(MARK_PENDING, mapOf("rows" to pending))
             }
         }
         writeRedis(changes.flatMap { it.edges })
+        if (pending.isNotEmpty()) clearPending(pending.map { it["author"] as String })
+    }
+
+    private fun clearPending(authors: List<String>) {
+        driver.session().use { session -> session.executeWriteWithoutResult { tx -> tx.run(CLEAR_PENDING, mapOf("authors" to authors)).consume() } }
+    }
+
+    override fun repairPendingRedis(): Int {
+        var repaired = 0
+        while (true) {
+            val batch =
+                driver.session().use { s ->
+                    s.executeRead { tx ->
+                        tx.run("MATCH (u:$PENDING_LABEL) RETURN u.pubkey AS a, u.redis_pending_removed AS removed LIMIT 500").list { rec ->
+                            rec["a"].asString() to (if (rec["removed"].isNull) emptyList() else rec["removed"].asList { it.asString() })
+                        }
+                    }
+                }
+            if (batch.isEmpty()) return repaired
+            val current = read(batch.map { it.first })
+            redis.resource.use { r ->
+                val pipe = r.pipelined()
+                for ((author, removed) in batch) {
+                    val state = current[author]
+                    for ((edge, prefix) in REVERSE_PREFIX) for (t in state?.edges(edge).orEmpty()) pipe.sadd(prefix + t, author)
+                    for (entry in removed) {
+                        val (rel, target) = entry.split('|', limit = 2).takeIf { it.size == 2 } ?: continue
+                        val edge = Edge.entries.firstOrNull { it.relType == rel } ?: continue
+                        val prefix = REVERSE_PREFIX[edge] ?: continue
+                        if (state?.edges(edge)?.contains(target) != true) pipe.srem(prefix + target, author)
+                    }
+                    pipe.del(DESIGNATES_PREFIX + author)
+                    val designated = state?.edges(Edge.DESIGNATES).orEmpty()
+                    if (designated.isNotEmpty()) pipe.sadd(DESIGNATES_PREFIX + author, *designated.toTypedArray())
+                }
+                pipe.sync()
+            }
+            clearPending(batch.map { it.first })
+            repaired += batch.size
+        }
+    }
+
+    override fun reconcileRedis(underLock: (() -> Unit) -> Unit): RedisRepair {
+        var keys = 0L
+        var replaced = 0L
+        var deleted = 0L
+        for (edge in Edge.entries) {
+            val reverse = edge != Edge.DESIGNATES
+            val prefix = REVERSE_PREFIX[edge] ?: DESIGNATES_PREFIX
+            // Pass 1: every key with an edge, its count against its set's size.
+            val degreeQuery =
+                if (reverse) {
+                    "MATCH (u:NostrUser) WITH u, COUNT { (u)<-[:${edge.relType}]-() } AS n WHERE n > 0 RETURN u.pubkey AS k, n"
+                } else {
+                    "MATCH (u:NostrUser) WITH u, COUNT { (u)-[:${edge.relType}]->() } AS n WHERE n > 0 RETURN u.pubkey AS k, n"
+                }
+            driver.session().use { s ->
+                val result = s.run(degreeQuery)
+                val batch = ArrayList<Pair<String, Long>>(RECONCILE_BATCH)
+                fun flush() {
+                    if (batch.isEmpty()) return
+                    underLock { replaced += replaceIfSizeDiffers(edge, prefix, reverse, batch) }
+                    keys += batch.size
+                    batch.clear()
+                }
+                while (result.hasNext()) {
+                    val rec = result.next()
+                    batch += rec["k"].asString() to rec["n"].asLong()
+                    if (batch.size >= RECONCILE_BATCH) flush()
+                }
+                flush()
+            }
+            // Pass 2: sets whose key has no edge left.
+            redis.resource.use { r ->
+                var cursor = ScanParams.SCAN_POINTER_START
+                val params = ScanParams().match("$prefix*").count(RECONCILE_BATCH)
+                do {
+                    val page = r.scan(cursor, params)
+                    cursor = page.cursor
+                    val found = page.result.map { it.removePrefix(prefix) }
+                    if (found.isNotEmpty()) underLock { deleted += deleteKeysWithoutEdges(edge, prefix, reverse, found) }
+                } while (cursor != ScanParams.SCAN_POINTER_START)
+            }
+        }
+        return RedisRepair(keys, replaced, deleted)
+    }
+
+    /** Re-reads both sides (the caller holds the write lock) and replaces each set whose size differs. */
+    private fun replaceIfSizeDiffers(
+        edge: Edge,
+        prefix: String,
+        reverse: Boolean,
+        batch: List<Pair<String, Long>>,
+    ): Long {
+        val sizes =
+            redis.resource.use { r ->
+                val pipe = r.pipelined()
+                val responses = batch.map { pipe.scard(prefix + it.first) }
+                pipe.sync()
+                responses.map { it.get() }
+            }
+        val keys = batch.map { it.first }
+        val degrees = degreesOf(edge, reverse, keys)
+        val differ = keys.filterIndexed { i, k -> sizes[i] != (degrees[k] ?: 0L) }
+        if (differ.isEmpty()) return 0
+        val members = membersOf(edge, reverse, differ)
+        redis.resource.use { r ->
+            for (k in differ) {
+                r.multi().apply {
+                    del(prefix + k)
+                    val m = members[k].orEmpty()
+                    if (m.isNotEmpty()) sadd(prefix + k, *m.toTypedArray())
+                    exec()
+                }
+            }
+        }
+        return differ.size.toLong()
+    }
+
+    private fun deleteKeysWithoutEdges(
+        edge: Edge,
+        prefix: String,
+        reverse: Boolean,
+        keys: List<String>,
+    ): Long {
+        val withEdges = degreesOf(edge, reverse, keys).filterValues { it > 0 }.keys
+        val orphans = keys.filter { it !in withEdges }
+        if (orphans.isNotEmpty()) redis.resource.use { r -> r.del(*orphans.map { prefix + it }.toTypedArray()) }
+        return orphans.size.toLong()
+    }
+
+    /** How many members [keys] should have; a key with no node is absent. */
+    private fun degreesOf(
+        edge: Edge,
+        reverse: Boolean,
+        keys: List<String>,
+    ): Map<String, Long> {
+        val count = if (reverse) "COUNT { (k)<-[:${edge.relType}]-() }" else "COUNT { (k)-[:${edge.relType}]->() }"
+        return driver.session().use { s ->
+            s.executeRead { tx ->
+                tx.run("UNWIND \$keys AS key MATCH (k:NostrUser {pubkey: key}) RETURN key, $count AS n", mapOf("keys" to keys)).list { rec ->
+                    rec["key"].asString() to rec["n"].asLong()
+                }.toMap()
+            }
+        }
+    }
+
+    /** The Redis members [keys] should have: their followers (reverse sets) or their designees. */
+    private fun membersOf(
+        edge: Edge,
+        reverse: Boolean,
+        keys: List<String>,
+    ): Map<String, List<String>> {
+        val pattern = if (reverse) "(k:NostrUser {pubkey: key})<-[:${edge.relType}]-(m:NostrUser)" else "(k:NostrUser {pubkey: key})-[:${edge.relType}]->(m:NostrUser)"
+        return driver.session().use { s ->
+            s.executeRead { tx ->
+                tx.run("UNWIND \$keys AS key MATCH $pattern RETURN key, collect(m.pubkey) AS members", mapOf("keys" to keys)).list { rec ->
+                    rec["key"].asString() to rec["members"].asList { it.asString() }
+                }.toMap()
+            }
+        }
     }
 
     private fun writeEdges(
@@ -243,6 +419,24 @@ class Neo4jRedisGraph(
                    u.mutes_event AS mutes_event, u.mutes_at AS mutes_at,
                    u.designations_event AS designations_event, u.designations_at AS designations_at,
                    u.report_events AS report_events
+            """.trimIndent()
+
+        /** The outbox: authors whose Redis copy their last write may not have reached. */
+        const val PENDING_LABEL = "GraphStreamerRedisPending"
+        private const val RECONCILE_BATCH = 5_000
+
+        private val MARK_PENDING =
+            """
+            UNWIND ${'$'}rows AS row
+            MATCH (u:NostrUser {pubkey: row.author})
+            SET u:$PENDING_LABEL, u.redis_pending_removed = row.removed
+            """.trimIndent()
+
+        private val CLEAR_PENDING =
+            """
+            UNWIND ${'$'}authors AS a
+            MATCH (u:NostrUser {pubkey: a})
+            REMOVE u:$PENDING_LABEL, u.redis_pending_removed
             """.trimIndent()
 
         private val READ_EDGES =

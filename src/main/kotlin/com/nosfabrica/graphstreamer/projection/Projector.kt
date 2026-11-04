@@ -6,6 +6,8 @@ import com.nosfabrica.graphstreamer.store.AuthorSource
 import com.nosfabrica.graphstreamer.store.EdgeChange
 import com.nosfabrica.graphstreamer.store.GraphStore
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.nosfabrica.graphstreamer.store.RedisRepair
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
@@ -93,6 +95,15 @@ class Projector(
             authorsRecomputed.addAndGet(authors.size.toLong())
             authors.size
         }
+
+    /** Replays the Redis writes a crash cut off (the outbox). Nothing in a dry run. */
+    suspend fun repairRedis(): Int = if (dryRun) 0 else lock.withLock { graph.repairPendingRedis() }
+
+    /**
+     * Makes every Redis set match Neo4j, a batch at a time under the lock, so writes go on between
+     * batches. Blocking: call it on an IO thread. Nothing in a dry run.
+     */
+    fun reconcileRedis(): RedisRepair? = if (dryRun) null else graph.reconcileRedis { batch -> runBlocking { lock.withLock { batch() } } }
 
     private fun change(
         author: String,

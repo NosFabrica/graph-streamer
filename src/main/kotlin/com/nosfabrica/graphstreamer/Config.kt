@@ -22,6 +22,11 @@ data class Config(
      */
     val auditRetryMinutes: Long = 30,
     /**
+     * How often every Redis set is compared with Neo4j and repaired; 0 = only when Redis comes up
+     * without the marker this leaves (empty, or flushed).
+     */
+    val redisAuditEveryHours: Long = 24,
+    /**
      * When set, audits compare only events created at or after this (epoch seconds), on both
      * sides. For a rehearsal or a partial rebuild; older events are neither downloaded nor checked.
      */
@@ -65,6 +70,7 @@ data class Config(
                 dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
                 auditRetryMinutes = optional("AUDIT_RETRY_MINUTES")?.toLong() ?: defaults.auditRetryMinutes,
+                redisAuditEveryHours = optional("REDIS_AUDIT_EVERY_HOURS")?.toLong() ?: defaults.redisAuditEveryHours,
                 auditSince = optional("AUDIT_SINCE")?.toLong(),
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,

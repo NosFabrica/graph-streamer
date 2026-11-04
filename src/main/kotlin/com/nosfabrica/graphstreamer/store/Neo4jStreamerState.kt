@@ -11,6 +11,8 @@ import org.neo4j.driver.Driver
  * - `audit_started_at`, `audit_ended_at`, `audit_complete`, and per audited kind
  *   `audit_<kind>_<counter>` (`need`, `have`, `downloaded`, `recomputed`, `complete`, `note`): the
  *   last audit's report. `audit_finished_at` is when the last complete one ended.
+ * - `redis_reconciled_at`, `redis_keys`, `redis_replaced`, `redis_deleted`, `redis_outbox`: the last
+ *   Redis reconcile (sets checked, replaced, deleted) and the authors the outbox last replayed.
  *
  * Written in a dry run too: it is not the graph, and without it every restart would run a full
  * dry-run audit, which downloads the relay's whole set.
@@ -25,6 +27,10 @@ class Neo4jStreamerState(
     override fun liveSince(): Long? = read("live_since")?.toLongOrNull()
 
     override fun putLiveSince(since: Long) = write(mapOf("live_since" to since.toString()))
+
+    override fun lastRedisReconcileAt(): Long? = read("redis_reconciled_at")?.toLongOrNull()
+
+    override fun putRedisReport(report: Map<String, String>) = write(report.mapKeys { (key, _) -> "redis_$key" })
 
     override fun putAuditReport(report: Map<String, String>) = write(report.mapKeys { (key, _) -> "audit_" + key.replace('.', '_') })
 

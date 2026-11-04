@@ -74,9 +74,17 @@ private suspend fun run(config: Config) {
         val live = LiveStream(client, relay, projector, state, config.liveOverlapSeconds, config.liveResumePointSeconds * 1000)
         val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince)
 
+        if (!config.dryRun) {
+            // Before anything writes: whatever a crash left between Neo4j and Redis.
+            val replayed = projector.repairRedis()
+            if (replayed > 0) log.warn("redis outbox: replayed {} authors a crash left behind", replayed)
+            state.putRedisReport(mapOf("outbox" to replayed.toString()))
+        }
+
         try {
             coroutineScope {
                 launch { live.run() }
+                if (!config.dryRun) launch { redisForever(projector, redis, state, config.redisAuditEveryHours * 3600) }
                 if (config.auditEveryHours > 0) launch { auditForever(audit, state, config.auditEveryHours * 3600, config.auditRetryMinutes * 60) }
                 launch {
                     while (isActive) {
@@ -130,6 +138,53 @@ private suspend fun auditForever(
         }
     }
 }
+
+/**
+ * Keeps Redis a faithful copy of Neo4j: a full reconcile when the marker it leaves in Redis is
+ * gone (Redis came up empty or was flushed), and every [everySeconds] (0: only then).
+ */
+private suspend fun redisForever(
+    projector: Projector,
+    redis: JedisPool,
+    state: StreamerState,
+    everySeconds: Long,
+) {
+    while (true) {
+        val now = System.currentTimeMillis() / 1000
+        val marked = runCatching { redis.resource.use { it.exists(REDIS_MARKER) } }.getOrDefault(true)
+        val last = state.lastRedisReconcileAt()
+        val due = !marked || (everySeconds > 0 && (last == null || now - last >= everySeconds))
+        if (due) {
+            try {
+                val started = System.currentTimeMillis()
+                val repair = projector.reconcileRedis() ?: return
+                redis.resource.use { it.set(REDIS_MARKER, now.toString()) }
+                val report =
+                    mapOf(
+                        "reconciled_at" to (System.currentTimeMillis() / 1000).toString(),
+                        "keys" to repair.keys.toString(),
+                        "replaced" to repair.replaced.toString(),
+                        "deleted" to repair.deleted.toString(),
+                    )
+                state.putRedisReport(report)
+                val level = if (repair.replaced + repair.deleted > 0) "repaired" else "matched"
+                log.info("redis reconcile {} in {} s: {}", level, (System.currentTimeMillis() - started) / 1000, report)
+                // Also replay the outbox: an audit's write may have failed between the stores.
+                projector.repairRedis()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("redis reconcile failed; next try in 10 minutes", e)
+                delay(600_000)
+                continue
+            }
+        }
+        delay(60_000)
+    }
+}
+
+/** Set in Redis after a reconcile: missing means Redis lost what it held. */
+const val REDIS_MARKER = "graph_streamer:redis_reconciled_at"
 
 /** When the next audit is due. */
 object AuditSchedule {
