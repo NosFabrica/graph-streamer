@@ -245,11 +245,16 @@ class EndToEndTest {
         val failed = stores.awaitAudit(started, seconds = 600, streamer = streamer)
         relay.start()
         assertEquals("false", failed["audit_follows_complete"], "$failed")
-        assertTrue((failed["audit_follows_note"] as String).contains("the next audit resumes it"), "$failed")
+        assertTrue((failed["audit_follows_note"] as String).contains("the next audit"), "$failed")
         assertTrue((failed["audit_follows_downloaded"] as String).toInt() < corpus.size, "no paging of the whole filter: $failed")
-        // AUDIT_RETRY_MINUTES=1: the retry comes by itself.
-        val retried = stores.awaitAudit((failed["audit_ended_at"] as String).toLong() + 1, streamer = streamer)
-        assertEquals("true", retried["audit_complete"], "$retried")
+        // AUDIT_RETRY_MINUTES=1: the retries come by themselves. After a long outage the client
+        // reconnects with backoff, so a retry can find the relay not answering yet: that kind is
+        // left incomplete again (nothing reconciled), and a later retry completes it.
+        waitFor(900, "a complete audit after the outage") {
+            if (!streamer.alive) error("the streamer died:\n" + streamer.logText().takeLast(3000))
+            stores.state()["audit_complete"] == "true"
+        }
+        val retried = stores.state()
         assertTrue((retried["audit_follows_windows"] as String).toInt() >= 15_000 / 500, "windows bounded by the relay's side too: $retried")
         assertOracle(relay)
     }

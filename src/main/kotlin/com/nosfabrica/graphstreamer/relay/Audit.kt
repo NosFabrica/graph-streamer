@@ -151,6 +151,19 @@ class Audit(
         localEntries: List<IdAndTime>,
         authorsOf: suspend (List<String>) -> List<String>,
     ): Report {
+        // First, the relay's count of the whole filter, waiting as long as the reconcile would. After
+        // a long outage the client reconnects with backoff: a window's COUNT given up before the
+        // connection is back leaves that window to our count alone, and the reconcile, which waits,
+        // then sends it unsplit; on a first audit that is the whole corpus. Answered, the relay is
+        // connected and counting. Unanswered, nothing is reconciled and the next audit retries,
+        // sooner than waiting out a reconcile against a relay that is down.
+        val relayHolds = client.count(relay, filter, idleTimeoutMs)?.count
+        if (relayHolds == null) {
+            log.warn("audit {}: the relay answered no COUNT; the next audit retries", name)
+            return Report(name, 0, 0, -1, 0, 0, 0, 0, complete = false, note = "the relay answered no COUNT; the next audit retries")
+                .also { log.info("audit {}", it) }
+        }
+
         val haves = ArrayList<String>()
         var downloaded = 0
         var unreconciled = false
