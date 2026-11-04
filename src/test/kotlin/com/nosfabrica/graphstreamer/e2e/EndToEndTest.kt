@@ -140,10 +140,12 @@ class EndToEndTest {
 
     @Test
     fun aRebuildMatchesTheRelay() {
-        rebuild(Corpus().events)
+        rebuild(Corpus().events, mapOf("AUDIT_WINDOW" to "50"))
         assertOracle(relay)
         val state = stores.state()
         assertEquals("0", state["audit_follows_have"])
+        // Our side was empty: only the relay's COUNT could split the 200 lists into windows of 50.
+        assertTrue((state["audit_follows_windows"] as String).toInt() >= 4, "$state")
     }
 
     @Test
@@ -237,16 +239,18 @@ class EndToEndTest {
         val started = now
         streamer.start(mapOf("AUDIT_WINDOW" to "500"))
         waitFor(120, "the first audit to start writing") { stores.count("MATCH ()-[r:FOLLOWS]->() RETURN count(r)") > 50_000 }
+        // Down until the audit gives up: a short outage is ridden out (Quartz re-asks a dropped
+        // download), so only a long one reaches the failure path.
         relay.stop()
-        Thread.sleep(8_000)
+        val failed = stores.awaitAudit(started, seconds = 600, streamer = streamer)
         relay.start()
-        val failed = stores.awaitAudit(started, streamer = streamer)
         assertEquals("false", failed["audit_follows_complete"], "$failed")
         assertTrue((failed["audit_follows_note"] as String).contains("the next audit resumes it"), "$failed")
         assertTrue((failed["audit_follows_downloaded"] as String).toInt() < corpus.size, "no paging of the whole filter: $failed")
         // AUDIT_RETRY_MINUTES=1: the retry comes by itself.
         val retried = stores.awaitAudit((failed["audit_ended_at"] as String).toLong() + 1, streamer = streamer)
         assertEquals("true", retried["audit_complete"], "$retried")
+        assertTrue((retried["audit_follows_windows"] as String).toInt() >= 15_000 / 500, "windows bounded by the relay's side too: $retried")
         assertOracle(relay)
     }
 
@@ -370,6 +374,43 @@ class EndToEndTest {
         assertEquals("true", second["audit_complete"], "$second")
         for (kind in listOf("follows", "mutes", "designations", "reports")) assertEquals("true", second["adopted_$kind"], "$kind: $second")
         waitFor(120, "the Redis reconcile") { (stores.state()["redis_reconciled_at"] as? String)?.toLong()?.let { it >= started } ?: false }
+        assertOracle(relay)
+    }
+
+    /**
+     * The GrapeRank write-back (the server's set_observer_scores) and the profile resolver
+     * (its Cypher) writing the same nodes, for two minutes, while the first audit writes edges.
+     */
+    @Test
+    fun otherWritersOnTheSameNodes() {
+        assumeTrue(E2E.serverPython != null, "GS_E2E_SERVER_PYTHON runs the other writers")
+        relay.load(bigCorpus(15_000, 60))
+        val started = now
+        streamer.start(mapOf("AUDIT_WINDOW" to "2000"))
+        waitFor(120, "the first audit to start writing") { stores.count("MATCH ()-[r:FOLLOWS]->() RETURN count(r)") > 10_000 }
+        val writers =
+            ProcessBuilder(
+                E2E.serverPython,
+                E2E.otherWriters,
+                "--server-dir",
+                File(E2E.serverDir).absolutePath,
+                "--neo4j",
+                E2E.neo4jUrl,
+                "--neo4j-password",
+                E2E.neo4jPassword,
+                "--seconds",
+                "120",
+            ).redirectErrorStream(true).start()
+        val state = stores.awaitAudit(started, seconds = 600, streamer = streamer)
+        val out = writers.inputStream.bufferedReader().readText()
+        writers.waitFor()
+        println(out.lines().last { it.isNotBlank() })
+        assertEquals(0, writers.exitValue(), out)
+        assertTrue(out.contains("'scores_failed': 0") && out.contains("'resolver_failed': 0"), out)
+        assertEquals("true", state["audit_complete"], "$state")
+        val log = streamer.logText()
+        assertTrue(!log.contains("failed") || !Regex("applying .* failed|audit failed|reconcile failed").containsMatchIn(log), log.takeLast(3000))
+        assertTrue(stores.count("MATCH ()-[r:ZAPS_VIA]->() RETURN count(r)") > 0, "the resolver wrote")
         assertOracle(relay)
     }
 

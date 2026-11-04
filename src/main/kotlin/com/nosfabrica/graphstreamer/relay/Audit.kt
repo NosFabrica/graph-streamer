@@ -9,6 +9,7 @@ import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.NegentropyLocalIndex
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.count
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAllPagesResuming
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchByIds
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.negentropyReconcile
@@ -122,15 +123,26 @@ class Audit(
         until: Long,
     ): Report {
         val local = if (dryRun) NegentropyLocalIndex.Empty else GraphListIndex(graph, kind)
-        return audit(kind.prop, RelayFilters.audit(kind.kind, until, since), local, emptyList()) { haves -> graph.authorsOfLists(kind, haves) }
+        return audit(kind.prop, RelayFilters.audit(kind.kind, until, since), bothSides(local), emptyList()) { haves -> graph.authorsOfLists(kind, haves) }
     }
 
     private suspend fun auditReports(until: Long): Report {
         val recorded = if (dryRun) emptyList() else graph.reports()
         val entries = localReportEntries(recorded, until, since)
         val authorOf = recorded.associate { (author, entry) -> entry.id to author }
-        return audit("reports", RelayFilters.audit(RelayFilters.REPORTS, until, since), null, entries) { haves -> haves.mapNotNull(authorOf::get).distinct() }
+        return audit("reports", RelayFilters.audit(RelayFilters.REPORTS, until, since), bothSides(NegentropyLocalIndex.of(entries)), emptyList()) { haves ->
+            haves.mapNotNull(authorOf::get).distinct()
+        }
     }
+
+    /**
+     * [local], with each window's count raised to the relay's when that is larger (NIP-45 COUNT):
+     * Quartz splits a window when the count is over the target, and only our side's count
+     * reached it. On a first audit or a migration our side is empty, so the whole corpus went to
+     * the relay as one window (the rehearsal: 21,556 mute lists in one; in production, every
+     * follow list). A relay that doesn't answer the COUNT leaves our side's count.
+     */
+    private fun bothSides(local: NegentropyLocalIndex): NegentropyLocalIndex = BothSidesIndex(local) { window -> client.count(relay, window)?.count }
 
     private suspend fun audit(
         name: String,
@@ -279,6 +291,23 @@ class AbsenceGuard(
             maxAbsent in 1 until absent -> Verdict(false, "$absent absent events exceed AUDIT_MAX_DELETES=$maxAbsent")
             else -> Verdict(true, "$absent absent events; their authors are recomputed")
         }
+}
+
+/** [local]'s entries; for its count, the larger of [local]'s and [remoteCount]'s. */
+class BothSidesIndex(
+    private val local: NegentropyLocalIndex,
+    private val remoteCount: suspend (Filter) -> Int?,
+) : NegentropyLocalIndex {
+    var remoteCounts = 0
+        private set
+
+    override suspend fun count(window: Filter): Int? {
+        val mine = local.count(window)
+        val theirs = remoteCount(window).also { remoteCounts++ }
+        return if (mine == null && theirs == null) null else maxOf(mine ?: 0, theirs ?: 0)
+    }
+
+    override suspend fun entriesFor(window: Filter): List<IdAndTime> = local.entriesFor(window)
 }
 
 /** The graph's recorded lists of one kind, read one `created_at` window at a time. */

@@ -8,8 +8,11 @@ It replaces the neofry path:
 - brainstorm_server's `process_strfry_event` consumer;
 - the `kind3Backfill` and `reportBackfill` workarounds around them.
 
-**Status: not yet run against the live relay or graph.** Unit-tested with fakes for Neo4j, Redis
-and the relay; the Cypher has not run against a real Neo4j yet. It defaults to `DRY_RUN=true`.
+**Status: rehearsed, not deployed.** Unit tests with fakes; an end-to-end suite against a real
+relay, Neo4j and Redis covering every way an edge enters or leaves, the failures we could name and
+the migration from a server-built graph ([E2E.md](E2E.md)); a rehearsal against
+search.brainstorm.world on 2026's slice (below). Not yet run at production size. It defaults to
+`DRY_RUN=true`.
 
 It keeps no copy of the events. The relay is the store. The graph records, on each author's
 node, which events its edges came from, and that is what the audit compares with the relay.
@@ -51,7 +54,10 @@ search relay ◀──── daily negentropy audit (need: download + apply; hav
    the graph. This is the only way edges leave the graph. A relay read that doesn't finish
    changes nothing; the audit stops recomputing that kind, and the next audit finds the same
    events still missing.
-4. **Audit.** Every `AUDIT_EVERY_HOURS`, each kind is reconciled with the relay over NIP-77.
+4. **Audit.** Every `AUDIT_EVERY_HOURS`, each kind is reconciled with the relay over NIP-77,
+   one `created_at` window at a time: a window is split while either side holds more than
+   `AUDIT_WINDOW` events (ours counted in Neo4j, the relay's by NIP-45 COUNT; on a first audit
+   our side is empty, and without the relay's count the whole corpus would be one window).
    Our side is read from the graph's bookkeeping:
    - *need* (the relay has it, the graph doesn't): downloaded and applied. This covers late
      arrivals, missed live events and, on the first run, the whole past.
@@ -59,6 +65,12 @@ search relay ◀──── daily negentropy audit (need: download + apply; hav
      whatever reason the relay dropped it: a deletion, a vanish, an expiry, a ban.
      The search relay is the source of truth, the same way vespa-relay's `deleteMissing` treats a
      provider's relay.
+   - *orphans* (edges with no bookkeeping, so no audit compares them: another writer's, such as
+     the server's consumer before cutover): after a complete reconcile, those authors are rebuilt
+     from the relay, behind `AUDIT_MAX_DELETES`. A sweep that finds none marks the kind
+     `adopted_<kind>` and the scan stops; from then on every edge has bookkeeping. Not with
+     `AUDIT_SINCE`. An author with report edges and no report ids is rebuilt from the relay on
+     their next report too, since applying a report only adds.
 
 Every graph write is read, compute, write under one lock, so applies and recomputes never
 interleave on an author.
@@ -124,10 +136,22 @@ through. Reports are few, so they are read whole.
 
 **Redis:** the reverse sets `followed_by:<target>`, `muted_by:<target>` and `reported_by:<target>`
 (SADD/SREM of the author as their edges change), and the forward set `designates:<author>`
-(replaced whole in one MULTI). Written after Neo4j.
+(replaced whole in one MULTI). Written after Neo4j, and kept a faithful copy of it two ways:
 
-Redis holds only those sets, which the GrapeRank worker and the server read. The service keeps
-no state of its own there: that Redis may evict any key (`allkeys-lru`).
+- **Outbox.** The transaction that writes an author's edges labels the node
+  `GraphStreamerRedisPending` and records the targets they lost (`redis_pending_removed`); the
+  label goes once Redis has the change. Startup replays whoever still has it, so a crash between
+  the two stores loses nothing.
+- **Reconcile.** Every set's size against its key's edge count in Neo4j; a set that differs is
+  replaced from Neo4j, a set with no edge left deleted, a batch at a time under the writer's lock.
+  It runs when the marker key `graph_streamer:redis_reconciled_at` is missing (Redis came up
+  empty, was flushed, or was built by the server's consumer) and every `REDIS_AUDIT_EVERY_HOURS`.
+  What it repaired goes to the state node (`redis_replaced`, `redis_deleted`): evictions show.
+
+Redis holds only those sets, which the GrapeRank worker and the server read. Production runs
+`allkeys-lru` at `maxmemory 24gb`; at the full graph's size (see below) these sets would be
+evicted, and an evicted set reads as empty to GrapeRank. Size Redis for them, or make them
+unevictable (`volatile-lru`, since they carry no TTL), before cutover.
 
 **The service's own state:** one `(:GraphStreamerState {name: "graph-streamer"})` node in the
 same Neo4j, every value a string.
@@ -137,7 +161,9 @@ same Neo4j, every value a string.
 | `live_since` | epoch seconds the live stream resumes from after a restart (its last resume point) |
 | `audit_started_at`, `audit_ended_at`, `audit_complete` | the last audit's start, end and whether every kind completed; an incomplete one runs again `AUDIT_RETRY_MINUTES` after its end |
 | `audit_finished_at` | when the last complete audit ended; the next is due `AUDIT_EVERY_HOURS` after it |
-| `audit_<kind>_<counter>` | per audited kind (`follows`, `mutes`, `designations`, `reports`): `need`, `have`, `downloaded`, `recomputed`, `complete`, `note` |
+| `audit_<kind>_<counter>` | per audited kind (`follows`, `mutes`, `designations`, `reports`): `need`, `have`, `orphans`, `ignored`, `windows`, `downloaded`, `recomputed`, `complete`, `note` |
+| `adopted_<kind>` | `true` once an orphan sweep of that kind found none |
+| `redis_reconciled_at`, `redis_keys`, `redis_replaced`, `redis_deleted`, `redis_outbox` | the last Redis reconcile and outbox replay |
 
 ## Running
 
@@ -154,6 +180,7 @@ same Neo4j, every value a string.
 | `DRY_RUN` | `true` | `false` writes the graph; anything not a switch stops the boot |
 | `AUDIT_EVERY_HOURS` | `24` | `0` turns the audit off |
 | `AUDIT_RETRY_MINUTES` | `30` | when an incomplete audit (a failed reconcile) runs again |
+| `REDIS_AUDIT_EVERY_HOURS` | `24` | full Redis reconcile from Neo4j; `0`: only when its marker is missing |
 | `AUDIT_SINCE` | unset | epoch seconds: audit only events created from then on, both sides (a rehearsal or a partial rebuild) |
 | `AUDIT_WINDOW` | `50000` | lists per reconcile window |
 | `AUDIT_MAX_DELETES` | `10000` | absent events per kind per audit; `0` = no limit |
@@ -178,11 +205,15 @@ relay. Set `AUDIT_EVERY_HOURS` high, or to 0, after the first one.
 ## Cutover
 
 1. Deploy with `DRY_RUN=true` beside the server's consumer. Read the first audit's counts: the
-   edges it would add and remove, per type.
-2. In one deploy, stop the server's `strfry:events` consumer for kinds 3, 5, 1984, 10000 and 10040
-   and set `DRY_RUN=false`. Never run two writers on the same edges. The first audit then records
-   every author's bookkeeping, writing only the edges that differ.
-3. Retire neofry's router streams and the transferer, along with `kind3Backfill`, `reportBackfill`
+   edges it would add and remove, per type, and `audit_<kind>_orphans` (capped at
+   `AUDIT_MAX_DELETES` + 1): the authors whose edges the relay can't account for.
+2. Size or reconfigure Redis for the sets (see Redis above).
+3. In one deploy, stop the server's `strfry:events` consumer for kinds 3, 5, 1984, 10000 and 10040
+   and set `DRY_RUN=false`, with `AUDIT_MAX_DELETES` at least the orphan count you accepted. Never
+   run two writers on the same edges. The first audit then records every author's bookkeeping,
+   writing only the edges that differ; the sweep rebuilds the orphans; the Redis reconcile (its
+   marker is missing) makes every set match Neo4j. Check with `tools/verify`.
+4. Retire neofry's router streams and the transferer, along with `kind3Backfill`, `reportBackfill`
    and `neofryResync`. Kind 39999 is still open.
 
 ## Rehearsal (2026-11-04)

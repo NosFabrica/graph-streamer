@@ -57,6 +57,7 @@ tasks.register<Test>("e2eTest") {
     include("**/e2e/**")
     dependsOn("installDist")
     systemProperty("graphstreamer.bin", layout.buildDirectory.file("install/graph-streamer/bin/graph-streamer").get().asFile.absolutePath)
+    systemProperty("graphstreamer.otherWriters", layout.projectDirectory.file("tools/rehearsal/other_writers.py").asFile.absolutePath)
     systemProperty("graphstreamer.serverBuild", layout.projectDirectory.file("tools/rehearsal/server_build.py").asFile.absolutePath)
     systemProperty("graphstreamer.verify", layout.projectDirectory.file("tools/verify/verify_graph.py").asFile.absolutePath)
     maxParallelForks = 1

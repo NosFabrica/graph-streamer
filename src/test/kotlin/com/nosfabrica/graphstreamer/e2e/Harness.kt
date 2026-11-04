@@ -39,6 +39,7 @@ object E2E {
     /** A Python with brainstorm_server's dependencies, for its consumer (the migration scenario). */
     val serverPython: String? = System.getenv("GS_E2E_SERVER_PYTHON")
     val serverBuild: String = System.getProperty("graphstreamer.serverBuild") ?: "tools/rehearsal/server_build.py"
+    val otherWriters: String = System.getProperty("graphstreamer.otherWriters") ?: "tools/rehearsal/other_writers.py"
     val bin: String = System.getProperty("graphstreamer.bin") ?: "build/install/graph-streamer/bin/graph-streamer"
     val verify: String = System.getProperty("graphstreamer.verify") ?: "tools/verify/verify_graph.py"
 }

@@ -35,6 +35,11 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
   Keep every guard in `AbsenceGuard` unless you replace it with a stronger one.
 - **Every graph write goes through `Projector`**, under its lock, with edges and bookkeeping in
   one Neo4j transaction. Bookkeeping that disagrees with the edges makes the audit wrong.
+- **Redis is a copy of Neo4j, never written on its own.** The same transaction marks the author
+  in the Redis outbox (`GraphStreamerRedisPending`); the mark goes after Redis has the change. A
+  write path that skips the mark loses Redis on a crash (`killedMidWriteItRecovers`).
+- **Bound windows by both sides.** Quartz splits a reconcile window on our count only; on a first
+  audit that is zero. `BothSidesIndex` adds the relay's NIP-45 COUNT. Keep it on every audited kind.
 - **Record every event the audit compares, even when it yields no edge** (an empty list, a note
   report). Otherwise it is downloaded again on every audit.
 - **Changing an audit filter in `RelayFilters` changes what is compared with the bookkeeping.**
@@ -43,6 +48,9 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
   server's consumer and its `backfill_redis_relationships`, the GrapeRank worker). Never
   interpolate data into Cypher. Relationship types and property names come from `Edge` and
   `ListKind`.
+- `./gradlew e2eTest` ([E2E.md](E2E.md)) runs the service against a real relay, Neo4j and Redis,
+  judged by `tools/verify` (the server's parsers). Add a scenario for any new way an edge enters
+  or leaves, and any failure you fix.
 - A new test must fail with the change it guards reverted. Check the test count, not only the
   exit code: a compile error also prints no failures.
 
