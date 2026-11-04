@@ -29,7 +29,8 @@ object RelayFilters {
     fun audit(
         kind: Int,
         until: Long,
-    ): Filter = Filter(kinds = listOf(kind), until = until, search = UNRANKED)
+        since: Long? = null,
+    ): Filter = Filter(kinds = listOf(kind), since = since, until = until, search = UNRANKED)
 
     /** Everything the relay holds now for [authors]: what a recompute rebuilds them from. */
     fun byAuthors(authors: List<String>): List<Filter> = listOf(Filter(authors = authors, kinds = GRAPH_KINDS, search = UNRANKED))

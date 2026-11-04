@@ -16,6 +16,11 @@ data class Config(
     val dryRun: Boolean = true,
     /** A negentropy audit of every graph kind against the relay this often; 0 turns it off. */
     val auditEveryHours: Long = 24,
+    /**
+     * When set, audits compare only events created at or after this (epoch seconds), on both
+     * sides. For a rehearsal or a partial rebuild; older events are neither downloaded nor checked.
+     */
+    val auditSince: Long? = null,
     /** Events per `created_at` window an audit reconciles at once (both sides read windowed). */
     val auditWindow: Int = 50_000,
     /**
@@ -54,6 +59,7 @@ data class Config(
                 searchRelayUrl = optional("SEARCH_RELAY_URL") ?: defaults.searchRelayUrl,
                 dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
+                auditSince = optional("AUDIT_SINCE")?.toLong(),
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,
                 liveResumePointSeconds = optional("LIVE_RESUME_POINT_SECONDS")?.toLong() ?: defaults.liveResumePointSeconds,

@@ -41,6 +41,8 @@ class Audit(
     private val targetWindow: Int,
     private val guard: AbsenceGuard,
     private val graceSeconds: Long = 3_600,
+    /** [com.nosfabrica.graphstreamer.Config.auditSince]: both sides are compared from here on. */
+    private val since: Long? = null,
     private val idleTimeoutMs: Long = 120_000,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
@@ -66,14 +68,14 @@ class Audit(
         until: Long,
     ): Report {
         val local = if (dryRun) NegentropyLocalIndex.Empty else GraphListIndex(graph, kind)
-        return audit(kind.prop, RelayFilters.audit(kind.kind, until), local, emptyList()) { haves -> graph.authorsOfLists(kind, haves) }
+        return audit(kind.prop, RelayFilters.audit(kind.kind, until, since), local, emptyList()) { haves -> graph.authorsOfLists(kind, haves) }
     }
 
     private suspend fun auditReports(until: Long): Report {
         val recorded = if (dryRun) emptyList() else graph.reports()
-        val entries = localReportEntries(recorded, until)
+        val entries = localReportEntries(recorded, until, since)
         val authorOf = recorded.associate { (author, entry) -> entry.id to author }
-        return audit("reports", RelayFilters.audit(RelayFilters.REPORTS, until), null, entries) { haves -> haves.mapNotNull(authorOf::get).distinct() }
+        return audit("reports", RelayFilters.audit(RelayFilters.REPORTS, until, since), null, entries) { haves -> haves.mapNotNull(authorOf::get).distinct() }
     }
 
     private suspend fun audit(
@@ -168,11 +170,15 @@ class Audit(
     companion object {
         private const val PAGE = 500
 
-        /** The recorded reports an audit up to [until] compares: newer ones would read as false haves. */
+        /**
+         * The recorded reports an audit of `[since, until]` compares: any outside the relay's
+         * filter would read as false haves, and their authors would be recomputed for nothing.
+         */
         fun localReportEntries(
             recorded: List<Pair<String, IdAndTime>>,
             until: Long,
-        ): List<IdAndTime> = recorded.map { it.second }.filter { it.createdAt <= until }
+            since: Long? = null,
+        ): List<IdAndTime> = recorded.map { it.second }.filter { it.createdAt <= until && (since == null || it.createdAt >= since) }
     }
 }
 

@@ -201,6 +201,9 @@ class Neo4jRedisGraph(
 
     override fun ensureIndexes() {
         driver.session().use { session ->
+            // Every write MERGEs on the pubkey, so without this each one scans every node. The
+            // server creates the same constraint, under the same name, so whichever starts first wins.
+            session.run(PUBKEY_CONSTRAINT).consume()
             for (kind in ListKind.entries) {
                 for (suffix in listOf("at", "event")) {
                     val prop = "${kind.prop}_$suffix"
@@ -213,6 +216,9 @@ class Neo4jRedisGraph(
     companion object {
         const val DESIGNATES_PREFIX = "designates:"
         private const val ID_CHUNK = 1_000
+
+        /** brainstorm_server's `create_pubkey_index`, verbatim in name and definition. */
+        const val PUBKEY_CONSTRAINT = "CREATE CONSTRAINT nostr_user_pubkey IF NOT EXISTS FOR (u:NostrUser) REQUIRE u.pubkey IS UNIQUE"
 
         val REVERSE_PREFIX =
             mapOf(

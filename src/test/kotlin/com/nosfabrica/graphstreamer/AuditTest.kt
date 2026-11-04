@@ -33,6 +33,12 @@ class AuditTest {
     }
 
     @Test
+    fun reportsOlderThanAuditSinceAreNotCompared() {
+        val recorded = listOf("a" to IdAndTime(100, "x"), "b" to IdAndTime(200, "y"), "c" to IdAndTime(300, "z"))
+        assertEquals(listOf(IdAndTime(200, "y")), Audit.localReportEntries(recorded, until = 250, since = 150))
+    }
+
+    @Test
     fun reportBookkeepingRoundTrips() {
         assertEquals(mapOf("abc" to 100L, "def" to 200L), Neo4jRedisGraph.parseReports(listOf("100:abc", "200:def", "garbage", ":x")))
     }

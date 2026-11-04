@@ -47,7 +47,7 @@ fun main() {
 
 private suspend fun run(config: Config) {
     val relay = RelayUrlNormalizer.normalize(config.searchRelayUrl)
-    log.info("graph-streamer: relay={} dryRun={}", relay.url, config.dryRun)
+    log.info("graph-streamer: relay={} dryRun={} auditSince={}", relay.url, config.dryRun, config.auditSince)
 
     // Redis holds only the sets other services read: the GrapeRank worker and the server.
     val redis = JedisPool(config.redisHost, config.redisPort)
@@ -69,7 +69,7 @@ private suspend fun run(config: Config) {
 
         val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch)
         val live = LiveStream(client, relay, projector, state, config.liveOverlapSeconds, config.liveResumePointSeconds * 1000)
-        val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes))
+        val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince)
 
         try {
             coroutineScope {

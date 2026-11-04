@@ -73,7 +73,7 @@ interface GraphStore {
     /** Every recorded report, with its author. Reports are few, so this is read whole. */
     fun reports(): List<Pair<String, IdAndTime>>
 
-    /** Creates the indexes the audit reads lists through. */
+    /** Creates the pubkey constraint every write merges on, and the indexes the audit reads lists through. */
     fun ensureIndexes()
 }
 
