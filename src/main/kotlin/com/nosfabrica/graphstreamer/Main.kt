@@ -12,6 +12,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -36,7 +37,9 @@ fun main() {
     val config = Config.fromEnv()
     val ok =
         try {
-            runBlocking { run(config) }
+            // The Neo4j and Redis clients block. On runBlocking's one thread, a long write froze
+            // every loop (live stream, resume point, stats) until it returned; IO threads don't.
+            runBlocking(Dispatchers.IO) { run(config) }
             true
         } catch (e: Throwable) {
             log.error("graph-streamer stopped", e)
