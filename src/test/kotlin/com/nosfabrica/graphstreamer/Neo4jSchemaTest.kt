@@ -6,6 +6,7 @@ import com.nosfabrica.graphstreamer.store.AuthorChange
 import com.nosfabrica.graphstreamer.store.EdgeChange
 import com.nosfabrica.graphstreamer.store.Neo4jRedisGraph
 import org.neo4j.driver.AuthTokens
+import org.neo4j.driver.Driver
 import org.neo4j.driver.GraphDatabase
 import redis.clients.jedis.JedisPool
 import kotlin.test.Test
@@ -58,24 +59,36 @@ class Neo4jSchemaTest {
                 pool.resource.use { r -> targets.forEach { r.del("followed_by:$it") } }
             }
             clear()
-            graph.ensureIndexes()
-
-            fun add(added: Set<String>) =
-                graph.write(listOf(AuthorChange(author, listOf(EdgeChange(author, Edge.FOLLOWS, targets.toSet(), added, emptySet())), AuthorState(), false)))
-
-            add(setOf(targets[0]))
-            // As a second writer would: the first target again, beside two new ones.
-            add(targets.toSet())
-
-            driver.session().use { session ->
-                val counts =
-                    session
-                        .run("MATCH (:NostrUser {pubkey: \$a})-[r:FOLLOWS]->(t:NostrUser) RETURN t.pubkey AS t, count(r) AS n", mapOf("a" to author))
-                        .list()
-                        .associate { it["t"].asString() to it["n"].asLong() }
-                assertEquals(targets.associateWith { 1L }, counts)
+            try {
+                graph.ensureIndexes()
+                writeTwice(graph, driver, author, targets)
+            } finally {
+                // A failed assertion must not leave a doubled edge in a shared scratch database.
+                clear()
             }
-            clear()
+        }
+    }
+
+    private fun writeTwice(
+        graph: Neo4jRedisGraph,
+        driver: Driver,
+        author: String,
+        targets: List<String>,
+    ) {
+        fun add(added: Set<String>) =
+            graph.write(listOf(AuthorChange(author, listOf(EdgeChange(author, Edge.FOLLOWS, targets.toSet(), added, emptySet())), AuthorState(), false)))
+
+        add(setOf(targets[0]))
+        // As a second writer would: the first target again, beside two new ones.
+        add(targets.toSet())
+
+        driver.session().use { session ->
+            val counts =
+                session
+                    .run("MATCH (:NostrUser {pubkey: \$a})-[r:FOLLOWS]->(t:NostrUser) RETURN t.pubkey AS t, count(r) AS n", mapOf("a" to author))
+                    .list()
+                    .associate { it["t"].asString() to it["n"].asLong() }
+            assertEquals(targets.associateWith { 1L }, counts)
         }
     }
 }
