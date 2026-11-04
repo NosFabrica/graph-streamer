@@ -324,7 +324,14 @@ def global_counts(driver, r, problem):
                 wrong.append((k, n, c))
         orphan_sets = 0
         for key in r.scan_iter(match=prefix + "*", count=10000):
-            if key[len(prefix) :] not in degrees:
+            k = key[len(prefix) :]
+            if k in degrees:
+                continue
+            # A key made after the degree pass (a target newly followed, on a graph being written)
+            # isn't in it: ask Neo4j now, then Redis again, before calling the set an orphan.
+            with driver.session() as s:
+                n = s.run(f"MATCH (u:NostrUser {{pubkey: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=k).single()
+            if (n["n"] if n else 0) == 0 and r.scard(key) > 0:
                 orphan_sets += 1
                 problem(f"global: {prefix} set with no {rel} edge in Neo4j", key)
         print(f"global {rel}: {len(keys):,} keys, {sum(degrees.values()):,} edges; {len(wrong):,} sets of the wrong size, {orphan_sets:,} sets with no edge")
