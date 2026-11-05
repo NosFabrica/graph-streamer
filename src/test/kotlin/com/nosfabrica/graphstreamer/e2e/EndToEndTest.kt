@@ -297,7 +297,12 @@ class EndToEndTest {
         streamer.stop()
         docker("restart", E2E.redisContainer) // no persistence: every set is gone, as after an eviction storm
         waitFor(60, "Redis back") { stores.redis.resource.use { it.ping() == "PONG" } }
+        val started = System.currentTimeMillis() / 1000
         audit()
+        // The rebuild is its own loop, not part of the audit: an audit with nothing to do finishes
+        // first, and the oracle would read Redis half rebuilt.
+        waitFor(120, "the Redis rebuild") { (stores.state()["redis_reconciled_at"] as? String)?.toLong()?.let { it >= started } ?: false }
+        assertTrue((stores.state()["redis_replaced"] as String).toLong() > 0, "${stores.state()}")
         assertOracle(relay)
     }
 
