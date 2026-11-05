@@ -1,0 +1,176 @@
+package com.nosfabrica.graphstreamer.projection
+
+import com.nosfabrica.graphstreamer.RelayFilters
+import com.nosfabrica.graphstreamer.store.AuthorChange
+import com.nosfabrica.graphstreamer.store.AuthorSource
+import com.nosfabrica.graphstreamer.store.EdgeChange
+import com.nosfabrica.graphstreamer.store.GraphStore
+import com.nosfabrica.graphstreamer.store.IncompleteRead
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import com.nosfabrica.graphstreamer.store.RedisRepair
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * The only writer to the graph. Two ways in:
+ *
+ * - [apply]: lists and reports as they arrive (live, or downloaded by an audit). A list replaces
+ *   the one the graph holds only if it is newer; a report adds its targets.
+ * - [recompute]: authors an audit found the relay no longer holds an event of are rebuilt from
+ *   what the relay holds now. The relay has already applied the deletion, the vanish or the
+ *   expiry, so this is how anything leaves the graph.
+ *
+ * Every write is read-compute-write under one lock, so the two never interleave on an author.
+ * With [dryRun] the changes are counted and logged, and the graph is not touched.
+ */
+class Projector(
+    private val graph: GraphStore,
+    private val source: AuthorSource,
+    private val dryRun: Boolean,
+    /** Authors recomputed from the relay per read. */
+    val batchSize: Int,
+    private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
+) {
+    private val log = LoggerFactory.getLogger(Projector::class.java)
+    private val lock = Mutex()
+
+    val eventsApplied = AtomicLong()
+    val authorsRecomputed = AtomicLong()
+    val authorsWritten = AtomicLong()
+    val edgesAdded = Edge.entries.associateWith { AtomicLong() }
+    val edgesRemoved = Edge.entries.associateWith { AtomicLong() }
+
+    /**
+     * Applies [events]; returns the ones the graph did not record, with why: an audit downloads
+     * those again every time, so it counts them.
+     */
+    suspend fun apply(events: List<Event>): List<Ignored> {
+        val graphEvents = events.filter { it.kind in RelayFilters.GRAPH_KINDS }.distinctBy { it.id }
+        if (graphEvents.isEmpty()) return emptyList()
+        val byAuthor = graphEvents.groupBy { it.pubKey }
+        val ignored = ArrayList<Ignored>()
+        lock.withLock {
+            val current = graph.read(byAuthor.keys.toList())
+            val now = clock()
+            // A report adds its targets to the ones held, which is right only if the held ones are
+            // ours. Report edges with no report ids came from another writer (the server's
+            // consumer, before cutover), so that author is rebuilt from the relay instead.
+            val adopting =
+                byAuthor.filter { (author, mine) ->
+                    val held = current[author]
+                    held != null && held.reports.isEmpty() && held.edges(Edge.REPORTS).isNotEmpty() && mine.any { it.kind == RelayFilters.REPORTS }
+                }.keys
+            val fromRelay =
+                if (adopting.isEmpty()) {
+                    emptyMap()
+                } else {
+                    try {
+                        source.currentEvents(adopting.toList()).groupBy { it.pubKey }.let { relay -> adopting.associateWith { relay[it].orEmpty() } }
+                    } catch (e: IncompleteRead) {
+                        // Not recorded, so the audit downloads them again and this is retried.
+                        log.warn("adopting {} authors' reports: the relay did not drain; left for the next audit", adopting.size)
+                        null
+                    }
+                }
+            commit(
+                byAuthor.mapNotNull { (author, mine) ->
+                    val held = current[author] ?: AuthorState()
+                    if (author in adopting && fromRelay == null) {
+                        mine.forEach { ignored += Ignored(it, "its author's reports could not be read back") }
+                        return@mapNotNull null
+                    }
+                    val target = fromRelay?.get(author)?.let { GraphRules.fromRelay(author, it, now) } ?: GraphRules.apply(author, held, mine, now)
+                    for (e in mine) {
+                        val recorded = target.heads.values.any { it.id == e.id } || e.id in target.reports
+                        if (!recorded) ignored += Ignored(e, GraphRules.whyNotRecorded(e, held, now))
+                    }
+                    change(author, held, target)
+                },
+            )
+            eventsApplied.addAndGet(graphEvents.size.toLong())
+        }
+        return ignored
+    }
+
+    /** An event [apply] did not record. */
+    data class Ignored(
+        val event: Event,
+        val reason: String,
+    )
+
+    /**
+     * Rebuilds [authors] (at most [batchSize]) from what the relay holds for them now; returns how
+     * many. Throws, writing nothing, unless the relay's answer drained.
+     */
+    suspend fun recompute(authors: List<String>): Int =
+        lock.withLock {
+            if (authors.isEmpty()) return@withLock 0
+            // Throws IncompleteRead unless the relay drained: half an answer would read as deletions.
+            val byAuthor = source.currentEvents(authors).groupBy { it.pubKey }
+            val current = graph.read(authors)
+            val now = clock()
+            commit(
+                authors.mapNotNull { author ->
+                    change(author, current[author] ?: AuthorState(), GraphRules.fromRelay(author, byAuthor[author].orEmpty(), now))
+                },
+            )
+            authorsRecomputed.addAndGet(authors.size.toLong())
+            authors.size
+        }
+
+    /** Replays the Redis writes a crash cut off (the outbox). Nothing in a dry run. */
+    suspend fun repairRedis(): Int = if (dryRun) 0 else lock.withLock { graph.repairPendingRedis() }
+
+    /**
+     * Makes every Redis set match Neo4j, a batch at a time under the lock, so writes go on between
+     * batches. Blocking: call it on an IO thread. Nothing in a dry run.
+     */
+    fun reconcileRedis(): RedisRepair? = if (dryRun) null else graph.reconcileRedis { batch -> runBlocking { lock.withLock { batch() } } }
+
+    private fun change(
+        author: String,
+        held: AuthorState,
+        target: AuthorState,
+    ): AuthorChange? {
+        val edges =
+            Edge.entries.mapNotNull { edge ->
+                val want = target.edges(edge)
+                val have = held.edges(edge)
+                val added = want - have
+                val removed = have - want
+                if (added.isEmpty() && removed.isEmpty()) null else EdgeChange(author, edge, want, added, removed)
+            }
+        val bookkeepingChanged = held.heads != target.heads || held.reports != target.reports
+        return if (edges.isEmpty() && !bookkeepingChanged) null else AuthorChange(author, edges, target, bookkeepingChanged)
+    }
+
+    private fun commit(changes: List<AuthorChange>) {
+        if (changes.isEmpty()) return
+        for (c in changes) {
+            for (e in c.edges) {
+                edgesAdded.getValue(e.edge).addAndGet(e.added.size.toLong())
+                edgesRemoved.getValue(e.edge).addAndGet(e.removed.size.toLong())
+            }
+        }
+        authorsWritten.addAndGet(changes.size.toLong())
+        if (dryRun) {
+            changes.take(DRY_RUN_SAMPLE).forEach { c ->
+                log.debug("dry-run {}: {}", c.author, c.edges.joinToString { "${it.edge} +${it.added.size} -${it.removed.size}" })
+            }
+        } else {
+            graph.write(changes)
+        }
+    }
+
+    fun stats(): String =
+        "applied=${eventsApplied.get()} recomputed=${authorsRecomputed.get()} authorsWritten=${authorsWritten.get()} " +
+            Edge.entries.joinToString(" ") { "${it.name.lowercase()}=+${edgesAdded.getValue(it).get()}/-${edgesRemoved.getValue(it).get()}" } +
+            if (dryRun) " (dry run)" else ""
+
+    companion object {
+        private const val DRY_RUN_SAMPLE = 5
+    }
+}
