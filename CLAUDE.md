@@ -15,7 +15,7 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 | `RelayFilters.kt` | Every filter sent to the relay: live, audit, by-author. |
 | `projection/GraphRules.kt` | Pure: `apply` (events onto an author's state) and `fromRelay` (state from the relay's events). Parsing matches brainstorm_server's. |
 | `projection/Projector.kt` | The only graph writer: applies events, recomputes the authors an audit hands it, under one lock. |
-| `relay/LiveStream.kt` | The live REQ (Quartz's `subscribeEvents`), applied in batches; a CLOSED the client can't recover from stops the process. |
+| `relay/LiveStream.kt` | The live REQ (Quartz's `subscribeEventBatches`), written a batch at a time, the resume point saved from `caughtUpAtFlow`; a CLOSED the client can't recover from stops the process. |
 | `relay/Audit.kt` | NIP-77 reconcile per kind against the graph's bookkeeping; `AbsenceGuard`; `GraphListIndex`. |
 | `relay/SearchRelayReader.kt` | By-author reads for recomputes; throws unless the relay drained. |
 | `store/` | `StreamerState` (live resume point, audit report: one Neo4j node), `GraphStore` (Neo4j + Redis), `AuthorSource`, and their implementations. |
@@ -38,8 +38,12 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 - **Redis is a copy of Neo4j, never written on its own.** The same transaction marks the author
   in the Redis outbox (`GraphStreamerRedisPending`); the mark goes after Redis has the change. A
   write path that skips the mark loses Redis on a crash (`killedMidWriteItRecovers`).
-- **Bound windows by both sides.** Quartz splits a reconcile window on our count only; on a first
-  audit that is zero. `BothSidesIndex` adds the relay's NIP-45 COUNT. Keep it on every audited kind.
+- **Bound windows by both sides.** Quartz splits a reconcile window on the local index's count; on
+  a first audit that is zero. Every audited kind's index goes through Quartz's `withRelayCount`,
+  which adds the relay's NIP-45 COUNT (bounded, retried, paused on a relay that stops answering).
+- **The live resume point counts only what was written.** `subscribeEventBatches` hands
+  `CaughtUpResume` an event once its batch's `collect` returns: never put a `buffer()` between
+  them, and write the batch inside the block.
 - **Record every event the audit compares, even when it yields no edge** (an empty list, a note
   report). Otherwise it is downloaded again on every audit.
 - **Changing an audit filter in `RelayFilters` changes what is compared with the bookkeeping.**
@@ -59,3 +63,8 @@ with `brainstorm_server` and `brainstorm_graperank_algorithm`.
 `./gradlew test`. Maven Central rate-limits bursts of parallel downloads; if a fresh build gets
 HTTP 429, re-run with `--max-workers=1`. Keep the Kotlin plugin at or above the version Quartz is
 built with.
+
+Quartz 2.16.0 comes from JitPack, as `com.github.vitorpamplona.quartz:quartz-jvm`: Maven Central
+refused that release (the org's monthly size limit, reset 2026-12-01). With the next release on
+Central, go back to `com.vitorpamplona.quartz:quartz`, drop the JitPack repository, and change the
+`-PquartzDir` substitution in `settings.gradle.kts` to match.

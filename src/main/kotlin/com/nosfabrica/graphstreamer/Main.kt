@@ -71,7 +71,7 @@ private suspend fun run(config: Config) {
         if (!config.dryRun) graph.ensureIndexes()
 
         val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch)
-        val live = LiveStream(client, relay, projector, state, config.liveOverlapSeconds, config.liveResumePointSeconds * 1000)
+        val live = LiveStream(client, relay, projector, state, config.liveResumePointSeconds * 1000)
         val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince, state = state)
 
         if (!config.dryRun) {

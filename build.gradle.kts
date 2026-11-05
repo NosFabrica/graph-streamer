@@ -12,10 +12,17 @@ repositories {
     maven("https://repo1.maven.org/maven2")
     // Quartz depends on AndroidX KMP artifacts (sqlite, collection), published there.
     google()
+    // Quartz 2.16.0 isn't on Maven Central: the vitorpamplona org hit Central's monthly release
+    // size limit (it resets 2026-12-01). JitPack built the v2.16.0 tag; only Quartz comes from it.
+    maven("https://jitpack.io") {
+        content { includeGroup("com.github.vitorpamplona.quartz") }
+    }
 }
 
 dependencies {
-    implementation("com.vitorpamplona.quartz:quartz:2.15.0")
+    // JitPack's root `quartz` module names a different group from its path, so depend on the JVM
+    // variant directly. Back to com.vitorpamplona.quartz:quartz once Central has a release.
+    implementation("com.github.vitorpamplona.quartz:quartz-jvm:2.16.0")
     // Quartz ships these as runtime-only; we compile against them.
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")

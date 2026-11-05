@@ -31,12 +31,12 @@ search relay ◀──── daily negentropy audit (need: download + apply; hav
    to live subscribers, so each new list and report arrives as the relay stores it. Deletions
    (kind 5) and vanishes (kind 62) aren't streamed: most clients leave the `k` tag off a kind 5,
    so a filter for deletions of graph kinds would miss most of them, and streaming every kind 5
-   would be far more to download. The audit catches them. It is Quartz's `subscribeEvents` (2.14+). Quartz reconnects on its own, with backoff, and
-   re-sends the REQ with its `since` moved to the newest `created_at` the stream was handed
-   (stored events counted at EOSE, capped at the machine's clock), minus `LIVE_OVERLAP_SECONDS`
-   (default 0). So after an outage of any length the REQ asks from where it began. The resume
-   point is also saved every `LIVE_RESUME_POINT_SECONDS`, and a restart starts from it.
-   Re-applying an event writes nothing.
+   would be far more to download. The audit catches them. It is Quartz's `subscribeEventBatches`. Quartz reconnects on its own, with backoff, and
+   re-sends the REQ with its `since` moved to the newest `created_at` written to the graph
+   (stored events counted at EOSE, capped at the machine's clock), so after an outage of any
+   length the REQ asks from where it began. The resume point counts only written batches; it is
+   saved every `LIVE_RESUME_POINT_SECONDS`, and a restart starts from it. A failed write is
+   retried for two minutes, then left to the audit. Re-applying an event writes nothing.
    Any CLOSED stops the process except the two the client recovers from itself: a rate limit with
    a stated back-off, and an `error:` or unprefixed one followed within 3 s by the connection
    dropping (a relay restarting), unless that repeats three times running. After a CLOSED, Quartz
@@ -185,7 +185,6 @@ same Neo4j, every value a string.
 | `AUDIT_WINDOW` | `50000` | lists per reconcile window |
 | `AUDIT_MAX_DELETES` | `10000` | absent events per kind per audit; `0` = no limit |
 | `LIVE_RESUME_POINT_SECONDS` | `60` | how often the live stream's resume point is saved for a restart |
-| `LIVE_OVERLAP_SECONDS` | `0` | how far before the resume point (the newest `created_at` the stream was handed) a reconnect or restart asks from. At 0, events still queued for the graph when the process stops wait for the next audit |
 | `PROJECT_BATCH` | `200` | authors per recompute (one relay read) |
 
 It is stateless and runs as one replica, because it must be the only writer of these edges. It

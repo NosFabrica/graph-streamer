@@ -9,8 +9,9 @@ import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.relay.client.INostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.NegentropyLocalIndex
-import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.count
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.withRelayCount
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchAllPagesResuming
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.count
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.fetchByIds
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.negentropyReconcile
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
@@ -136,13 +137,13 @@ class Audit(
     }
 
     /**
-     * [local], with each window's count raised to the relay's when that is larger (NIP-45 COUNT):
-     * Quartz splits a window when the count is over the target, and only our side's count
-     * reached it. On a first audit or a migration our side is empty, so the whole corpus went to
-     * the relay as one window (the rehearsal: 21,556 mute lists in one; in production, every
-     * follow list). A relay that doesn't answer the COUNT leaves our side's count.
+     * [local], with each window's count raised to the relay's NIP-45 COUNT when that is larger:
+     * Quartz splits a window when the count is over the target, and on a first audit or a
+     * migration our side is empty, so without the relay's count the whole corpus would go to the
+     * relay as one window. Quartz bounds how many COUNTs it asks, retries one that goes
+     * unanswered, and pauses asking a relay that keeps not answering.
      */
-    private fun bothSides(local: NegentropyLocalIndex): NegentropyLocalIndex = BothSidesIndex(local) { window -> client.count(relay, window)?.count }
+    private fun bothSides(local: NegentropyLocalIndex): NegentropyLocalIndex = local.withRelayCount(client, relay)
 
     private suspend fun audit(
         name: String,
@@ -152,11 +153,11 @@ class Audit(
         authorsOf: suspend (List<String>) -> List<String>,
     ): Report {
         // First, the relay's count of the whole filter, waiting as long as the reconcile would. After
-        // a long outage the client reconnects with backoff: a window's COUNT given up before the
-        // connection is back leaves that window to our count alone, and the reconcile, which waits,
-        // then sends it unsplit; on a first audit that is the whole corpus. Answered, the relay is
-        // connected and counting. Unanswered, nothing is reconciled and the next audit retries,
-        // sooner than waiting out a reconcile against a relay that is down.
+        // a long outage the client reconnects with backoff: a window's COUNT (15 s) given up before
+        // the connection is back leaves that window to our count alone, and the reconcile, which
+        // waits, then sends it unsplit; on a first audit that is the whole corpus. Answered, the
+        // relay is connected and counting. Unanswered, nothing is reconciled and the next audit
+        // retries, sooner than waiting out a reconcile against a relay that is down.
         val relayHolds = client.count(relay, filter, idleTimeoutMs)?.count
         if (relayHolds == null) {
             log.warn("audit {}: the relay answered no COUNT; the next audit retries", name)
@@ -304,23 +305,6 @@ class AbsenceGuard(
             maxAbsent in 1 until absent -> Verdict(false, "$absent absent events exceed AUDIT_MAX_DELETES=$maxAbsent")
             else -> Verdict(true, "$absent absent events; their authors are recomputed")
         }
-}
-
-/** [local]'s entries; for its count, the larger of [local]'s and [remoteCount]'s. */
-class BothSidesIndex(
-    private val local: NegentropyLocalIndex,
-    private val remoteCount: suspend (Filter) -> Int?,
-) : NegentropyLocalIndex {
-    var remoteCounts = 0
-        private set
-
-    override suspend fun count(window: Filter): Int? {
-        val mine = local.count(window)
-        val theirs = remoteCount(window).also { remoteCounts++ }
-        return if (mine == null && theirs == null) null else maxOf(mine ?: 0, theirs ?: 0)
-    }
-
-    override suspend fun entriesFor(window: Filter): List<IdAndTime> = local.entriesFor(window)
 }
 
 /** The graph's recorded lists of one kind, read one `created_at` window at a time. */

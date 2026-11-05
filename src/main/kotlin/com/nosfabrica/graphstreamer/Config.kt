@@ -40,16 +40,10 @@ data class Config(
      */
     val auditMaxDeletes: Int = 10_000,
     /**
-     * How often the live stream's resume point (the newest `created_at` it was handed, minus
-     * [liveOverlapSeconds]) is saved for a restart. A reconnect needs no saving: Quartz resumes
-     * the REQ it re-sends from that point.
+     * How often the live stream's resume point (the newest `created_at` it has written to the
+     * graph) is saved for a restart. A reconnect needs no saving: Quartz resumes from that point.
      */
     val liveResumePointSeconds: Long = 60,
-    /**
-     * How far before the resume point a reconnect, or a restart, asks from. 0: from the point
-     * itself. Events still queued for the graph at a restart are then left to the next audit.
-     */
-    val liveOverlapSeconds: Long = 0,
     /** Authors recomputed from the relay per batch. */
     val projectBatch: Int = 200,
 ) {
@@ -75,7 +69,6 @@ data class Config(
                 auditWindow = optional("AUDIT_WINDOW")?.toInt() ?: defaults.auditWindow,
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,
                 liveResumePointSeconds = optional("LIVE_RESUME_POINT_SECONDS")?.toLong() ?: defaults.liveResumePointSeconds,
-                liveOverlapSeconds = optional("LIVE_OVERLAP_SECONDS")?.toLong() ?: defaults.liveOverlapSeconds,
                 projectBatch = optional("PROJECT_BATCH")?.toInt() ?: defaults.projectBatch,
             )
         }

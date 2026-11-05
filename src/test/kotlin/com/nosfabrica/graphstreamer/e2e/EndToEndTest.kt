@@ -424,6 +424,27 @@ class EndToEndTest {
         assertOracle(relay)
     }
 
+    /**
+     * Neo4j down while live events arrive: the write is retried, and the resume point counts only
+     * written batches, so every event reaches the graph without an audit.
+     */
+    @Test
+    fun aStoreOutageLosesNoLiveEvent() {
+        val corpus = Corpus()
+        rebuild(corpus.events)
+        val lists = corpus.signers.subList(40, 45).map { it.event(3, pTags(6)) }
+        docker("stop", E2E.neo4jContainer)
+        publish(*lists.toTypedArray())
+        Thread.sleep(15_000) // the streamer is retrying its write
+        docker("start", E2E.neo4jContainer)
+        waitFor(120, "Neo4j back") { stores.count("RETURN 1") == 1L }
+        waitFor(180, "the lists published during the outage, with no audit") {
+            lists.all { l -> stores.edges(l.pubKey, "FOLLOWS") == l.tags.map { it[1] }.toSet() }
+        }
+        assertTrue(streamer.alive, "the process rode it out")
+        assertOracle(relay, grace = 0)
+    }
+
     @Test
     fun aDryRunWritesNothing() {
         relay.load(Corpus().events)

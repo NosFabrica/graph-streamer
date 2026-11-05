@@ -16,7 +16,7 @@ rootProject.name = "graph-streamer"
 providers.gradleProperty("quartzDir").orNull?.let { dir ->
     includeBuild(dir) {
         dependencySubstitution {
-            substitute(module("com.vitorpamplona.quartz:quartz")).using(project(":quartz"))
+            substitute(module("com.github.vitorpamplona.quartz:quartz-jvm")).using(project(":quartz"))
         }
     }
 }
