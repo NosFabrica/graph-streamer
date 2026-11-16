@@ -118,8 +118,8 @@ no TTL) before cutover.
 
 ## Dry run
 
-`DRY_RUN=true` writes nothing to the graph (schema included) or its Redis sets, but keeps the
-state node so restarts don't re-run the audit. It logs the changes it would make (`stats:`, every
+`DRY_RUN=true` writes nothing to the graph (schema included) or its Redis sets and asks the
+Scorecard database for no ids, but keeps the state node so restarts don't re-run the audit. It logs the changes it would make (`stats:`, every
 minute). With no bookkeeping, every dry-run audit downloads everything the relay holds: the
 measurement of how far the existing graph is from the relay. Set `AUDIT_EVERY_HOURS` high or `0`
 after the first one.

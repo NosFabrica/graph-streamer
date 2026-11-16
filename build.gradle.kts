@@ -29,6 +29,8 @@ dependencies {
 
     implementation("org.neo4j.driver:neo4j-java-driver:5.28.15")
     implementation("redis.clients:jedis:7.2.0")
+    // User ids come from the Scorecard database (brainstorm_server's `nostr_user`).
+    implementation("org.postgresql:postgresql:42.7.7")
     implementation("org.slf4j:slf4j-simple:2.0.13")
 
     testImplementation(kotlin("test"))

@@ -39,6 +39,11 @@ These names are a contract with brainstorm_server and the GrapeRank worker.
 | `REPORTS` | every kind 1984 the relay holds | `p` tags of user reports only (a report with an `e` tag is about a note) |
 | `DESIGNATES` | newest kind 10040 | public rows named `<kind>[:<tag>]`, never the author's own key |
 
+**User ids:** every node this service creates carries `user_id`, its id from `nostr_user` in
+the Scorecard database (the server owns that table). Ids for a batch's authors and added
+targets are committed there before the Neo4j transaction, which sets `user_id` only where a
+node has none. An id is never overwritten: a node holding a different one is left and logged.
+
 **Neo4j bookkeeping**, on the author's node, in the same transaction as the edges:
 `follows_event`/`follows_at`, `mutes_event`/`mutes_at`, `designations_event`/`designations_at`
 (id and `created_at` of the list the edges came from), and `report_events`
@@ -63,6 +68,7 @@ report). See [DESIGN.md](DESIGN.md#state-node).
 | `REDIS_HOST`, `REDIS_PORT` | — | |
 | `SEARCH_RELAY_URL` | `wss://search.brainstorm.world` | |
 | `DRY_RUN` | `true` | `false` writes the graph; any other value stops the boot |
+| `SCORECARD_DB_HOST`, `SCORECARD_DB_PORT`, `SCORECARD_DB_NAME`, `SCORECARD_DB_USER`, `SCORECARD_DB_PASSWORD` | — | the Scorecard database (`nostr_user`); required with `DRY_RUN=false`, never read in a dry run |
 | `AUDIT_EVERY_HOURS` | `24` | `0` turns the audit off |
 | `AUDIT_RETRY_MINUTES` | `30` | retry delay for an incomplete audit |
 | `REDIS_AUDIT_EVERY_HOURS` | `24` | full Redis-vs-Neo4j check; `0`: only when Redis comes up empty |
@@ -73,7 +79,8 @@ report). See [DESIGN.md](DESIGN.md#state-node).
 | `PROJECT_BATCH` | `200` | authors per recompute read |
 
 Run exactly **one replica**: it must be the only writer of these edges. It needs the
-`NostrUser.pubkey` uniqueness constraint brainstorm_server creates. CI publishes
+`NostrUser.pubkey` and `NostrUser.user_id` uniqueness constraints (it creates them if missing)
+and the server's `nostr_user` table. CI publishes
 `ghcr.io/nosfabrica/graph-streamer` on every push (branch, `sha-<short>`, `latest` on `main`).
 
 ## Cutover

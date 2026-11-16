@@ -12,6 +12,8 @@ uses brainstorm_server's parsers, not ours. It is not part of `./gradlew test`.
   `include:spam` token from filters, which the search relay reads as "no lens".
 - **Neo4j 5 and Redis 7** in Docker, wiped before each test. Use scratch containers: the suite
   deletes everything in them.
+- **Postgres 16** in Docker as the Scorecard database. The suite creates `nostr_user` there
+  (the server's migration, verbatim) and empties it before each test.
 - **The oracle**: `tools/verify/verify_graph.py` over every author either side holds, plus the
   whole-graph checks (every Redis set against its key's edges, no edge without bookkeeping).
 
@@ -25,6 +27,10 @@ docker run -d --name neo4j-e2e --network host -e NEO4J_AUTH=neo4j/testpassword12
 
 ```bash
 docker run -d --name redis-e2e --network host redis:7-alpine redis-server --port 6380 --save "" --appendonly no
+```
+
+```bash
+docker run -d --name pg-e2e -e POSTGRES_PASSWORD=testpassword123 -e POSTGRES_DB=scorecard -p 127.0.0.1:5441:5432 postgres:16
 ```
 
 ```bash
@@ -46,6 +52,8 @@ dependencies (its `pyproject.toml`), as `GS_E2E_SERVER_PYTHON`; without it they 
 | `GS_E2E_NEO4J_CONTAINER` | `neo4j-e2e` | restarted by one scenario |
 | `GS_E2E_REDIS_PORT` | `6380` | |
 | `GS_E2E_REDIS_CONTAINER` | `redis-e2e` | restarted by one scenario |
+| `GS_E2E_PG_HOST`, `GS_E2E_PG_PORT` | `127.0.0.1`, `5441` | |
+| `GS_E2E_PG_DB`, `GS_E2E_PG_USER`, `GS_E2E_PG_PASSWORD` | `scorecard`, `postgres`, `testpassword123` | |
 | `GS_E2E_PYTHON` | `python3` | with `neo4j redis websockets` |
 | `GS_E2E_SERVER_PYTHON` | unset | with brainstorm_server's dependencies |
 | `BRAINSTORM_SERVER_DIR` | `../brainstorm_server` | the oracle's parsers, the server's consumer |
@@ -66,6 +74,11 @@ Each test's service log is in `build/e2e-logs/<test>.log`.
 | `aNeo4jRestartMidAuditIsSurvived` | Neo4j restarted during the first audit: the process stays up and the next complete audit is exact. |
 | `aLostRedisIsRebuilt` | Redis restarted empty: the reconcile rebuilds every set from Neo4j. |
 | `aDriftedRedisIsReconciled` | Evicted sets, extra and missing members, sets with no edge: the reconcile repairs each. |
+| `everyNodeARebuildMakesHasItsId` | After a first audit every node carries the id `nostr_user` gives its pubkey, and no id is on two nodes. |
+| `aNewTargetGetsAnIdAndAReplayChangesNothing` | Targets new to the graph get ids through the live stream; a full audit afterwards moves no id and draws none. |
+| `aNodeAnotherWriterNumberedKeepsItsId` | A node the server numbered first keeps that id. |
+| `twoIdCallsRacingAgree` | Eight concurrent id calls for the same new pubkeys return the same ids. |
+| `aDryRunNeedsNoScorecardDatabase`, `writingWithoutAScorecardDatabaseRefusesToStart` | A dry run starts without the connection and asks for no ids; write mode without it stops at boot. |
 | `aServerBuiltGraphMigrates` | A graph built by the server's consumer (stale versions applied last, lists and reports the relay never had, a list deletion it never applied) becomes exactly the relay's, every kind adopted. |
 | `otherWritersOnTheSameNodes` | The GrapeRank write-back and the profile resolver writing the same nodes for two minutes: no failed batch on either side, an exact graph. |
 | `aDryRunWritesNothing` | `DRY_RUN=true`: one state node, no edge, an empty Redis. |

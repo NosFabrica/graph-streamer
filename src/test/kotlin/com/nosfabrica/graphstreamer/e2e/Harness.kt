@@ -33,6 +33,14 @@ object E2E {
     val neo4jContainer = System.getenv("GS_E2E_NEO4J_CONTAINER") ?: "neo4j-e2e"
     val redisPort = (System.getenv("GS_E2E_REDIS_PORT") ?: "6380").toInt()
     val redisContainer = System.getenv("GS_E2E_REDIS_CONTAINER") ?: "redis-e2e"
+
+    /** The Scorecard database: a scratch Postgres the suite creates `nostr_user` in and empties. */
+    val pgHost = System.getenv("GS_E2E_PG_HOST") ?: "127.0.0.1"
+    val pgPort = System.getenv("GS_E2E_PG_PORT") ?: "5441"
+    val pgDb = System.getenv("GS_E2E_PG_DB") ?: "scorecard"
+    val pgUser = System.getenv("GS_E2E_PG_USER") ?: "postgres"
+    val pgPassword = System.getenv("GS_E2E_PG_PASSWORD") ?: "testpassword123"
+    val pgUrl = "jdbc:postgresql://$pgHost:$pgPort/$pgDb"
     val python = System.getenv("GS_E2E_PYTHON") ?: "python3"
     val serverDir = System.getenv("BRAINSTORM_SERVER_DIR") ?: "../brainstorm_server"
 
@@ -124,6 +132,11 @@ class Streamer(
                 "REDIS_PORT" to E2E.redisPort.toString(),
                 "SEARCH_RELAY_URL" to relayUrl,
                 "DRY_RUN" to "false",
+                "SCORECARD_DB_HOST" to E2E.pgHost,
+                "SCORECARD_DB_PORT" to E2E.pgPort,
+                "SCORECARD_DB_NAME" to E2E.pgDb,
+                "SCORECARD_DB_USER" to E2E.pgUser,
+                "SCORECARD_DB_PASSWORD" to E2E.pgPassword,
                 "LIVE_RESUME_POINT_SECONDS" to "1",
                 "JAVA_OPTS" to "-Xmx512m",
             ) + extraEnv + env,
@@ -169,7 +182,40 @@ class Stores : AutoCloseable {
             s.run("SHOW INDEXES YIELD name, type WHERE type <> 'LOOKUP' RETURN name").list().forEach { s.run("DROP INDEX ${it["name"].asString()} IF EXISTS").consume() }
         }
         redis.resource.use { it.flushAll() }
+        pg { c ->
+            // brainstorm_server's migration, verbatim: the table is the contract.
+            c.createStatement().use { s ->
+                s.execute("CREATE SEQUENCE IF NOT EXISTS nostr_user_id_seq AS integer")
+                s.execute(
+                    "CREATE TABLE IF NOT EXISTS nostr_user (id integer PRIMARY KEY DEFAULT nextval('nostr_user_id_seq'), " +
+                        "pubkey text NOT NULL UNIQUE, CONSTRAINT nostr_user_pubkey_is_hex CHECK (pubkey ~ '^[0-9a-f]{64}\$'))",
+                )
+                s.execute("ALTER SEQUENCE nostr_user_id_seq OWNED BY nostr_user.id")
+                s.execute("TRUNCATE nostr_user RESTART IDENTITY")
+            }
+        }
     }
+
+    fun <T> pg(block: (java.sql.Connection) -> T): T = java.sql.DriverManager.getConnection(E2E.pgUrl, E2E.pgUser, E2E.pgPassword).use(block)
+
+    /** `nostr_user`, pubkey → id. */
+    fun tableIds(): Map<String, Int> =
+        pg { c ->
+            c.createStatement().use { s ->
+                s.executeQuery("SELECT pubkey, id FROM nostr_user").use { rows ->
+                    buildMap { while (rows.next()) put(rows.getString(1), rows.getInt(2)) }
+                }
+            }
+        }
+
+    /** How far the id sequence has been drawn. */
+    fun idsDrawn(): Long = pg { c -> c.createStatement().use { s -> s.executeQuery("SELECT last_value FROM nostr_user_id_seq").use { it.next(); it.getLong(1) } } }
+
+    /** Every user node, pubkey → `user_id` (null when it has none). */
+    fun nodeIds(): Map<String, Int?> =
+        driver.session().use { s ->
+            s.run("MATCH (u:NostrUser) RETURN u.pubkey AS pk, u.user_id AS id").list { it["pk"].asString() to it["id"].takeUnless { v -> v.isNull }?.asInt() }.toMap()
+        }
 
     fun state(): Map<String, Any?> =
         driver.session().use { s ->

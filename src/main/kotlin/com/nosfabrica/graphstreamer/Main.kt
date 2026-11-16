@@ -6,6 +6,7 @@ import com.nosfabrica.graphstreamer.relay.Audit
 import com.nosfabrica.graphstreamer.relay.LiveStream
 import com.nosfabrica.graphstreamer.relay.SearchRelayReader
 import com.nosfabrica.graphstreamer.store.Neo4jRedisGraph
+import com.nosfabrica.graphstreamer.store.PostgresUserIds
 import com.nosfabrica.graphstreamer.store.Neo4jStreamerState
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
@@ -65,7 +66,8 @@ private suspend fun run(config: Config) {
             .build()
     val client = NostrClient(BasicOkHttpWebSocket.Builder { http })
 
-    Neo4jRedisGraph(neo4j, redis).use { graph ->
+    val userIds = config.scorecardDb?.let { PostgresUserIds(it.jdbcUrl, it.user, it.password) }
+    Neo4jRedisGraph(neo4j, redis, userIds).use { graph ->
         // A dry run changes nothing in the graph, schema included; it never reads these. It does
         // keep its own state node (Neo4jStreamerState).
         if (!config.dryRun) graph.ensureIndexes()

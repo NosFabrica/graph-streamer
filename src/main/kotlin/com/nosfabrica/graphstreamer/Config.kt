@@ -46,7 +46,22 @@ data class Config(
     val liveResumePointSeconds: Long = 60,
     /** Authors recomputed from the relay per batch. */
     val projectBatch: Int = 200,
+    /**
+     * Where every node this service creates gets its User id (brainstorm_server's `nostr_user`).
+     * Required to write; never read in a dry run.
+     */
+    val scorecardDb: ScorecardDb? = null,
 ) {
+    data class ScorecardDb(
+        val host: String,
+        val port: Int,
+        val name: String,
+        val user: String,
+        val password: String,
+    ) {
+        val jdbcUrl get() = "jdbc:postgresql://$host:$port/$name"
+    }
+
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): Config {
             fun required(name: String) = env[name]?.takeIf { it.isNotBlank() } ?: error("$name is not set")
@@ -54,6 +69,7 @@ data class Config(
             fun optional(name: String) = env[name]?.takeIf { it.isNotBlank() }
 
             val defaults = Config("", "", "", "", 0)
+            val dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun
             return Config(
                 neo4jUrl = required("NEO4J_URL"),
                 neo4jUsername = required("NEO4J_USERNAME"),
@@ -61,7 +77,7 @@ data class Config(
                 redisHost = required("REDIS_HOST"),
                 redisPort = required("REDIS_PORT").toInt(),
                 searchRelayUrl = optional("SEARCH_RELAY_URL") ?: defaults.searchRelayUrl,
-                dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun,
+                dryRun = dryRun,
                 auditEveryHours = optional("AUDIT_EVERY_HOURS")?.toLong() ?: defaults.auditEveryHours,
                 auditRetryMinutes = optional("AUDIT_RETRY_MINUTES")?.toLong() ?: defaults.auditRetryMinutes,
                 redisAuditEveryHours = optional("REDIS_AUDIT_EVERY_HOURS")?.toLong() ?: defaults.redisAuditEveryHours,
@@ -70,6 +86,19 @@ data class Config(
                 auditMaxDeletes = optional("AUDIT_MAX_DELETES")?.toInt() ?: defaults.auditMaxDeletes,
                 liveResumePointSeconds = optional("LIVE_RESUME_POINT_SECONDS")?.toLong() ?: defaults.liveResumePointSeconds,
                 projectBatch = optional("PROJECT_BATCH")?.toInt() ?: defaults.projectBatch,
+                // Writing without it would create nodes with no user_id, so that refuses to start.
+                scorecardDb =
+                    if (dryRun) {
+                        null
+                    } else {
+                        ScorecardDb(
+                            host = required("SCORECARD_DB_HOST"),
+                            port = required("SCORECARD_DB_PORT").toInt(),
+                            name = required("SCORECARD_DB_NAME"),
+                            user = required("SCORECARD_DB_USER"),
+                            password = required("SCORECARD_DB_PASSWORD"),
+                        )
+                    },
             )
         }
 
