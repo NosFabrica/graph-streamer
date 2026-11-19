@@ -455,5 +455,88 @@ class EndToEndTest {
         assertEquals(0L, stores.count("MATCH ()-[r]->() RETURN count(r)"))
         assertEquals(0L, stores.redis.resource.use { it.dbSize() })
         assertTrue((state["audit_follows_need"] as String).toInt() > 150, "$state")
+        assertEquals(emptyMap(), stores.tableIds(), "a dry run asks for no ids")
+    }
+
+    @Test
+    fun aDryRunNeedsNoScorecardDatabase() {
+        relay.load(Corpus().events)
+        streamer.start(mapOf("DRY_RUN" to "true", "SCORECARD_DB_HOST" to "", "SCORECARD_DB_PASSWORD" to ""))
+        val state = stores.awaitAudit(now, streamer = streamer)
+        assertEquals("true", state["audit_complete"], "$state")
+    }
+
+    @Test
+    fun writingWithoutAScorecardDatabaseRefusesToStart() {
+        streamer.start(mapOf("SCORECARD_DB_HOST" to ""))
+        waitFor(30, "the process to stop") { !streamer.alive }
+        assertTrue("SCORECARD_DB_HOST is not set" in streamer.logText(), streamer.logText().takeLast(2000))
+        assertEquals(0L, stores.count("MATCH (n) RETURN count(n)"))
+    }
+
+    /** Every node the service made carries the id `nostr_user` gives its pubkey. */
+    private fun assertEveryNodeHasItsId() {
+        val nodes = stores.nodeIds()
+        val table = stores.tableIds()
+        assertTrue(nodes.isNotEmpty())
+        assertEquals(emptyList(), nodes.filterValues { it == null }.keys.take(5), "nodes without a user_id")
+        assertEquals(emptyMap(), nodes.filter { (pk, id) -> table[pk] != id }.entries.take(5).associate { it.toPair() }, "nodes disagreeing with nostr_user")
+        assertEquals(nodes.size, nodes.values.toSet().size, "an id on two nodes")
+    }
+
+    @Test
+    fun everyNodeARebuildMakesHasItsId() {
+        rebuild(Corpus().events)
+        assertEveryNodeHasItsId()
+        assertOracle(relay)
+    }
+
+    @Test
+    fun aNewTargetGetsAnIdAndAReplayChangesNothing() {
+        val corpus = Corpus()
+        rebuild(corpus.events)
+        val author = corpus.signers[10]
+        val fresh = List(5) { Signer().pubkey }
+        val list = author.event(3, (pTags(4) + fresh.map { listOf("p", it) }))
+        publish(list)
+        waitFor(30, "the new list in the graph") { stores.edges(author.pubkey, "FOLLOWS") == list.tags.map { it[1] }.toSet() }
+        assertEveryNodeHasItsId()
+        val nodes = stores.nodeIds()
+        assertTrue(fresh.all { nodes[it] != null }, "the new targets have ids")
+
+        val drawn = stores.idsDrawn()
+        // A full audit reads every list again; the graph already holds them all.
+        val state = audit()
+        assertEquals("true", state["audit_complete"], "$state")
+        assertEquals(nodes, stores.nodeIds(), "a replay moved an id")
+        assertEquals(drawn, stores.idsDrawn(), "a replay drew ids")
+        assertOracle(relay, grace = 0)
+    }
+
+    @Test
+    fun aNodeAnotherWriterNumberedKeepsItsId() {
+        val corpus = Corpus()
+        // The server's consumer got to this author first and numbered the node.
+        val author = corpus.signers[10].pubkey
+        val theirs = com.nosfabrica.graphstreamer.store.PostgresUserIds(E2E.pgUrl, E2E.pgUser, E2E.pgPassword).idsFor(listOf(author)).getValue(author)
+        stores.driver.session().use { it.run("CREATE (:NostrUser {pubkey: \$p, user_id: \$i})", mapOf("p" to author, "i" to theirs)).consume() }
+        rebuild(corpus.events)
+        assertEquals(theirs, stores.nodeIds()[author])
+        assertEveryNodeHasItsId()
+    }
+
+    @Test
+    fun twoIdCallsRacingAgree() {
+        val ids = com.nosfabrica.graphstreamer.store.PostgresUserIds(E2E.pgUrl, E2E.pgUser, E2E.pgPassword)
+        val pubkeys = List(300) { Signer().pubkey }
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        try {
+            val results = pool.invokeAll(List(8) { i -> java.util.concurrent.Callable { ids.idsFor(if (i % 2 == 0) pubkeys else pubkeys.reversed()) } }).map { it.get() }
+            assertTrue(results.all { it == results.first() })
+            assertEquals(300, results.first().values.toSet().size)
+            assertEquals(results.first(), stores.tableIds())
+        } finally {
+            pool.shutdown()
+        }
     }
 }

@@ -44,6 +44,9 @@ mechanism or safeguard in DESIGN.md; a new e2e scenario in E2E.md's table.
   Keep every guard in `AbsenceGuard` unless you replace it with a stronger one.
 - **Every graph write goes through `Projector`**, under its lock, edges and bookkeeping in one
   Neo4j transaction. Bookkeeping that disagrees with the edges makes the audit wrong.
+- **Every node a write may create gets its `user_id` by the id rule** (README, "User ids"): ids
+  are committed in the Scorecard database before the Neo4j transaction and set only where a node
+  has none. A new `MERGE` of a `NostrUser` needs the same.
 - **Redis is a copy of Neo4j.** The same transaction labels the author
   `GraphStreamerRedisPending`; the label is removed after Redis has the change. A write path that
   skips it loses Redis on a crash (`killedMidWriteItRecovers`).

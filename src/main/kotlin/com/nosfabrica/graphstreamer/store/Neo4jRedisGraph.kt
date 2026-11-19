@@ -7,6 +7,7 @@ import com.nosfabrica.graphstreamer.projection.ListKind
 import com.vitorpamplona.quartz.nip01Core.store.IdAndTime
 import org.neo4j.driver.Driver
 import org.neo4j.driver.TransactionContext
+import org.slf4j.LoggerFactory
 import redis.clients.jedis.JedisPool
 import redis.clients.jedis.params.ScanParams
 
@@ -36,10 +37,15 @@ import redis.clients.jedis.params.ScanParams
  * Relationship types and property names come from [Edge] and [ListKind], never from data: a
  * fixed set of query texts, so Neo4j caches a fixed set of plans. Writes are managed
  * transactions, so the driver retries transient errors (the GrapeRank write-back locks the same nodes).
+ *
+ * With [userIds], every node a write may create gets its `user_id` by the id rule: the ids of the
+ * batch's authors and newly added targets are committed in the Scorecard database before the
+ * Neo4j transaction opens, and set on each node that has none. An id is never overwritten.
  */
 class Neo4jRedisGraph(
     private val driver: Driver,
     private val redis: JedisPool,
+    private val userIds: UserIds? = null,
 ) : GraphStore,
     AutoCloseable {
     override fun close() = driver.close()
@@ -76,13 +82,26 @@ class Neo4jRedisGraph(
     override fun write(changes: List<AuthorChange>) {
         if (changes.isEmpty()) return
         val pending = changes.filter { it.edges.isNotEmpty() }.map { c -> mapOf("author" to c.author, "removed" to c.edges.flatMap { e -> e.removed.map { "${e.edge.relType}|$it" } }) }
+        // Before the transaction: an id must be durable before a node carries it.
+        val ids = userIds?.idsFor(creatable(changes))
+        val mismatched = ArrayList<String>()
         driver.session().use { session ->
             session.executeWrite { tx ->
-                for ((edge, rows) in changes.flatMap { it.edges }.groupBy { it.edge }) writeEdges(tx, edge, rows)
-                val bookkeeping = changes.filter { it.bookkeepingChanged }.map(::bookkeepingRow)
-                if (bookkeeping.isNotEmpty()) tx.run(WRITE_BOOKKEEPING, mapOf("rows" to bookkeeping))
+                mismatched.clear()
+                for ((edge, rows) in changes.flatMap { it.edges }.groupBy { it.edge }) mismatched += writeEdges(tx, edge, rows, ids)
+                val bookkeeping = changes.filter { it.bookkeepingChanged }.map { c -> bookkeepingRow(c) + ("user_id" to ids?.getValue(c.author)) }
+                if (bookkeeping.isNotEmpty()) {
+                    if (ids == null) {
+                        tx.run(WRITE_BOOKKEEPING, mapOf("rows" to bookkeeping))
+                    } else {
+                        mismatched += tx.run(WRITE_BOOKKEEPING_WITH_IDS, mapOf("rows" to bookkeeping)).single()["mismatched"].asList { it.asString() }
+                    }
+                }
                 if (pending.isNotEmpty()) tx.run(MARK_PENDING, mapOf("rows" to pending))
             }
+        }
+        if (mismatched.isNotEmpty()) {
+            log.error("{} nodes hold a user_id other than nostr_user's; left as they are: {}", mismatched.toSet().size, mismatched.toSet().take(5))
         }
         writeRedis(changes.flatMap { it.edges })
         if (pending.isNotEmpty()) clearPending(pending.map { it["author"] as String })
@@ -262,13 +281,31 @@ class Neo4jRedisGraph(
         }
     }
 
+    /** Every pubkey a write may create a node for: authors it merges, and targets it adds. */
+    private fun creatable(changes: List<AuthorChange>): Set<String> {
+        val out = HashSet<String>()
+        for (c in changes) {
+            if (c.bookkeepingChanged) out += c.author
+            for (e in c.edges) {
+                if (e.added.isNotEmpty()) {
+                    out += e.author
+                    out += e.added
+                }
+            }
+        }
+        return out
+    }
+
+    /** Returns the pubkeys whose node already held a different `user_id`. */
     private fun writeEdges(
         tx: TransactionContext,
         edge: Edge,
         rows: List<EdgeChange>,
-    ) {
+        ids: Map<String, Int>?,
+    ): List<String> {
         val removals = rows.filter { it.removed.isNotEmpty() }.map { mapOf("author" to it.author, "targets" to it.removed.toList()) }
-        val additions = rows.filter { it.added.isNotEmpty() }.map { mapOf("author" to it.author, "targets" to it.added.toList()) }
+        val added = rows.filter { it.added.isNotEmpty() }
+        val additions = added.map { mapOf("author" to it.author, "targets" to it.added.toList()) }
         if (removals.isNotEmpty()) {
             tx.run(
                 """
@@ -279,6 +316,37 @@ class Neo4jRedisGraph(
                 """,
                 mapOf("rows" to removals),
             )
+        }
+        if (additions.isNotEmpty() && ids != null) {
+            // The same write as below, with each node given its id where it has none.
+            return tx
+                .run(
+                    """
+                    UNWIND ${'$'}rows AS row
+                    MERGE (a:NostrUser {pubkey: row.author})
+                    FOREACH (_ IN CASE WHEN a.user_id IS NULL THEN [1] ELSE [] END | SET a.user_id = row.author_id)
+                    WITH a, row
+                    OPTIONAL MATCH (a)-[:${edge.relType}]->(held:NostrUser)
+                    WITH a, row, collect(held.pubkey) AS heldTargets
+                    UNWIND [t IN row.targets WHERE NOT t.pubkey IN heldTargets] AS tr
+                        MERGE (t:NostrUser {pubkey: tr.pubkey})
+                        FOREACH (_ IN CASE WHEN t.user_id IS NULL THEN [1] ELSE [] END | SET t.user_id = tr.id)
+                        CREATE (a)-[:${edge.relType}]->(t)
+                    RETURN collect(DISTINCT CASE WHEN t.user_id <> tr.id THEN t.pubkey END) +
+                           collect(DISTINCT CASE WHEN a.user_id <> row.author_id THEN a.pubkey END) AS mismatched
+                    """,
+                    mapOf(
+                        "rows" to
+                            added.map { c ->
+                                mapOf(
+                                    "author" to c.author,
+                                    "author_id" to ids.getValue(c.author),
+                                    "targets" to c.added.map { mapOf("pubkey" to it, "id" to ids.getValue(it)) },
+                                )
+                            },
+                    ),
+                ).single()["mismatched"]
+                .asList { it.asString() }
         }
         if (additions.isNotEmpty()) {
             // Not MERGE on the edge: it checks each edge against the author's, which grow with every
@@ -300,6 +368,7 @@ class Neo4jRedisGraph(
                 mapOf("rows" to additions),
             )
         }
+        return emptyList()
     }
 
     private fun bookkeepingRow(c: AuthorChange): Map<String, Any?> {
@@ -401,6 +470,7 @@ class Neo4jRedisGraph(
             // Every write MERGEs on the pubkey, so without this each one scans every node. The
             // server creates the same constraint, under the same name, so whichever starts first wins.
             session.run(PUBKEY_CONSTRAINT).consume()
+            session.run(USER_ID_CONSTRAINT).consume()
             for (kind in ListKind.entries) {
                 for (suffix in listOf("at", "event")) {
                     val prop = "${kind.prop}_$suffix"
@@ -416,6 +486,11 @@ class Neo4jRedisGraph(
 
         /** brainstorm_server's `create_pubkey_index`, verbatim in name and definition. */
         const val PUBKEY_CONSTRAINT = "CREATE CONSTRAINT nostr_user_pubkey IF NOT EXISTS FOR (u:NostrUser) REQUIRE u.pubkey IS UNIQUE"
+
+        /** brainstorm_server's constraint on the id, verbatim in name and definition. */
+        const val USER_ID_CONSTRAINT = "CREATE CONSTRAINT nostr_user_user_id IF NOT EXISTS FOR (u:NostrUser) REQUIRE u.user_id IS UNIQUE"
+
+        private val log = LoggerFactory.getLogger(Neo4jRedisGraph::class.java)
 
         val REVERSE_PREFIX =
             mapOf(
@@ -468,6 +543,18 @@ class Neo4jRedisGraph(
                 u.mutes_event = row.mutes_event, u.mutes_at = row.mutes_at,
                 u.designations_event = row.designations_event, u.designations_at = row.designations_at,
                 u.report_events = row.report_events
+            """.trimIndent()
+
+        private val WRITE_BOOKKEEPING_WITH_IDS =
+            """
+            UNWIND ${'$'}rows AS row
+            MERGE (u:NostrUser {pubkey: row.author})
+            FOREACH (_ IN CASE WHEN u.user_id IS NULL THEN [1] ELSE [] END | SET u.user_id = row.user_id)
+            SET u.follows_event = row.follows_event, u.follows_at = row.follows_at,
+                u.mutes_event = row.mutes_event, u.mutes_at = row.mutes_at,
+                u.designations_event = row.designations_event, u.designations_at = row.designations_at,
+                u.report_events = row.report_events
+            RETURN collect(DISTINCT CASE WHEN u.user_id <> row.user_id THEN u.pubkey END) AS mismatched
             """.trimIndent()
 
         /** `"<created_at>:<id>"` entries → id → created_at; anything malformed is skipped. */
