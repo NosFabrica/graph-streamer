@@ -69,6 +69,7 @@ report). See [DESIGN.md](DESIGN.md#state-node).
 | `SEARCH_RELAY_URL` | `wss://search.brainstorm.world` | |
 | `DRY_RUN` | `true` | `false` writes the graph; any other value stops the boot |
 | `SCORECARD_DB_HOST`, `SCORECARD_DB_PORT`, `SCORECARD_DB_NAME`, `SCORECARD_DB_USER`, `SCORECARD_DB_PASSWORD` | — | the Scorecard database (`nostr_user`); required with `DRY_RUN=false`, never read in a dry run |
+| `SCORES_IN_POSTGRES` | `false` | follows the server's switch. `true` with `DRY_RUN=false` stops the boot: the Redis sets are then named by User id, which this service does not write yet |
 | `AUDIT_EVERY_HOURS` | `24` | `0` turns the audit off |
 | `AUDIT_RETRY_MINUTES` | `30` | retry delay for an incomplete audit |
 | `REDIS_AUDIT_EVERY_HOURS` | `24` | full Redis-vs-Neo4j check; `0`: only when Redis comes up empty |

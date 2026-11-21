@@ -70,6 +70,12 @@ data class Config(
 
             val defaults = Config("", "", "", "", 0)
             val dryRun = optional("DRY_RUN")?.let(::parseSwitch) ?: defaults.dryRun
+            // With SCORES_IN_POSTGRES the server, the worker and the profile resolver name users in
+            // the Redis sets by User id. This service still writes pubkeys there, so it must not
+            // write beside them: it would rebuild sets nobody reads and miss the ones they do.
+            check(dryRun || optional("SCORES_IN_POSTGRES")?.let(::parseSwitch) != true) {
+                "SCORES_IN_POSTGRES=true: the Redis sets are named by User id, which this build does not write. Run with DRY_RUN=true."
+            }
             return Config(
                 neo4jUrl = required("NEO4J_URL"),
                 neo4jUsername = required("NEO4J_USERNAME"),

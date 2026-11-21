@@ -1,5 +1,7 @@
 package com.nosfabrica.graphstreamer
 
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -35,5 +37,15 @@ class ConfigTest {
             val error = assertFailsWith<IllegalStateException> { Config.fromEnv(base + (scorecard - missing) + ("DRY_RUN" to "false")) }
             assertEquals("$missing is not set", error.message)
         }
+    }
+
+    @Test
+    fun writingWhileTheSetsAreNamedByUserIdRefusesToStart() {
+        val ids = base + scorecard + ("SCORES_IN_POSTGRES" to "true")
+        val error = assertFailsWith<IllegalStateException> { Config.fromEnv(ids + ("DRY_RUN" to "false")) }
+        assertTrue(error.message!!.contains("SCORES_IN_POSTGRES"))
+        // A dry run writes no sets, and the switch off changes nothing.
+        assertTrue(Config.fromEnv(ids + ("DRY_RUN" to "true")).dryRun)
+        assertFalse(Config.fromEnv(base + scorecard + ("SCORES_IN_POSTGRES" to "false") + ("DRY_RUN" to "false")).dryRun)
     }
 }
