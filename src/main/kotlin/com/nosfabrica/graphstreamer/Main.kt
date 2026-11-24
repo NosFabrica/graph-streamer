@@ -6,8 +6,9 @@ import com.nosfabrica.graphstreamer.relay.Audit
 import com.nosfabrica.graphstreamer.relay.LiveStream
 import com.nosfabrica.graphstreamer.relay.SearchRelayReader
 import com.nosfabrica.graphstreamer.store.Neo4jRedisGraph
-import com.nosfabrica.graphstreamer.store.PostgresUserIds
 import com.nosfabrica.graphstreamer.store.Neo4jStreamerState
+import com.nosfabrica.graphstreamer.store.PostgresUserIds
+import com.nosfabrica.graphstreamer.store.RedisIngestHold
 import com.nosfabrica.graphstreamer.store.StreamerState
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
@@ -72,7 +73,7 @@ private suspend fun run(config: Config) {
         // keep its own state node (Neo4jStreamerState).
         if (!config.dryRun) graph.ensureIndexes()
 
-        val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch)
+        val projector = Projector(graph, SearchRelayReader(client, relay), config.dryRun, config.projectBatch, gate = RedisIngestHold(redis))
         val live = LiveStream(client, relay, projector, state, config.liveResumePointSeconds * 1000)
         val audit = Audit(client, relay, graph, projector, config.dryRun, config.auditWindow, AbsenceGuard(config.auditMaxDeletes), since = config.auditSince, state = state)
 

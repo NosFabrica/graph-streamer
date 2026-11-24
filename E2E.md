@@ -11,11 +11,14 @@ uses brainstorm_server's parsers, not ours. It is not part of `./gradlew test`.
   stopped and started mid-audit; its store is a file, so events survive. It drops the
   `include:spam` token from filters, which the search relay reads as "no lens".
 - **Neo4j 5 and Redis 7** in Docker, wiped before each test. Use scratch containers: the suite
-  deletes everything in them.
+  deletes everything in them. The default Neo4j port, 7688, is also where the one-click stack
+  publishes its Neo4j: with that stack up, give the scratch containers other ports
+  (`GS_E2E_NEO4J`, `GS_E2E_REDIS_PORT`).
 - **Postgres 16** in Docker as the Scorecard database. The suite creates `nostr_user` there
   (the server's migration, verbatim) and empties it before each test.
 - **The oracle**: `tools/verify/verify_graph.py` over every author either side holds, plus the
   whole-graph checks (every Redis set against its key's edges, no edge without bookkeeping).
+  It expects every set named by User id, read from the nodes' `user_id`.
 
 ## Running it
 
@@ -73,6 +76,8 @@ Each test's service log is in `build/e2e-logs/<test>.log`.
 | `killedMidWriteItRecovers` | SIGKILL four times during the first audit: after a restart, Neo4j and Redis are exact (the Redis outbox). |
 | `aNeo4jRestartMidAuditIsSurvived` | Neo4j restarted during the first audit: the process stays up and the next complete audit is exact. |
 | `aLostRedisIsRebuilt` | Redis restarted empty: the reconcile rebuilds every set from Neo4j. |
+| `whileIngestIsHeldNothingIsWrittenAndNothingIsLost` | With `ingest:hold` set, two lists published live change nothing; once the key is deleted the newer one is in the graph and Redis. |
+| `whileTheSetsAreNamedByPubkeyNothingIsWritten` | Started while the pubkey naming is claimed: no node, no set; the first audit runs once the claim is `ids`. |
 | `aDriftedRedisIsReconciled` | Evicted sets, extra and missing members, sets with no edge: the reconcile repairs each. |
 | `everyNodeARebuildMakesHasItsId` | After a first audit every node carries the id `nostr_user` gives its pubkey, and no id is on two nodes. |
 | `aNewTargetGetsAnIdAndAReplayChangesNothing` | Targets new to the graph get ids through the live stream; a full audit afterwards moves no id and draws none. |

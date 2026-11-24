@@ -28,7 +28,7 @@ mechanism or safeguard in DESIGN.md; a new e2e scenario in E2E.md's table.
 | `relay/LiveStream.kt` | The live REQ (Quartz `subscribeEventBatches`), written a batch at a time; resume point from `caughtUpAtFlow`. |
 | `relay/Audit.kt` | NIP-77 reconcile per kind against the graph's bookkeeping; `AbsenceGuard`; `GraphListIndex`. |
 | `relay/SearchRelayReader.kt` | By-author reads for recomputes; throws `IncompleteRead` unless the relay drained. |
-| `store/` | `StreamerState` (resume point, audit report: one Neo4j node), `GraphStore` (Neo4j + Redis), `AuthorSource`, implementations. |
+| `store/` | `StreamerState` (resume point, audit report: one Neo4j node), `GraphStore` (Neo4j + Redis), `UserIds`, `WriteGate` (`ingest:hold`), `AuthorSource`, implementations. |
 | `tools/verify/` | The e2e oracle: checks the graph with brainstorm_server's parsers. |
 
 ## Rules
@@ -47,6 +47,10 @@ mechanism or safeguard in DESIGN.md; a new e2e scenario in E2E.md's table.
 - **Every node a write may create gets its `user_id` by the id rule** (README, "User ids"): ids
   are committed in the Scorecard database before the Neo4j transaction and set only where a node
   has none. A new `MERGE` of a `NostrUser` needs the same.
+- **Redis names users by User id**, key and member, never by pubkey; the ids come from the same
+  `nostr_user` call as the nodes' (README, "Redis").
+- **Nothing is written while the hold stands** (`ingest:hold`; DESIGN.md, "Hold"). The check is in
+  `Projector`; a write path around it writes into a rename or a rebuild.
 - **Redis is a copy of Neo4j.** The same transaction labels the author
   `GraphStreamerRedisPending`; the label is removed after Redis has the change. A write path that
   skips it loses Redis on a crash (`killedMidWriteItRecovers`).

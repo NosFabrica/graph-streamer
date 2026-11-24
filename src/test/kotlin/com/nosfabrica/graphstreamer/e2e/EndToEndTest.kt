@@ -169,6 +169,45 @@ class EndToEndTest {
     }
 
     @Test
+    fun whileIngestIsHeldNothingIsWrittenAndNothingIsLost() {
+        val corpus = Corpus()
+        rebuild(corpus.events)
+        val a = corpus.signers[10]
+        val before = stores.edges(a.pubkey, "FOLLOWS")
+        stores.redis.resource.use { it.set("ingest:hold", "1") }
+        val first = a.event(3, pTags(7), createdAt = System.currentTimeMillis() / 1000 - 1)
+        val second = a.event(3, pTags(9))
+        publish(first)
+        Thread.sleep(8_000)
+        assertEquals(before, stores.edges(a.pubkey, "FOLLOWS"), "written while held")
+        publish(second)
+        Thread.sleep(2_000)
+        assertEquals(before, stores.edges(a.pubkey, "FOLLOWS"), "written while held")
+
+        stores.redis.resource.use { it.del("ingest:hold") }
+        waitFor(30, "the held lists in the graph") { stores.edges(a.pubkey, "FOLLOWS") == second.tags.map { it[1] }.toSet() }
+        assertOracle(relay, grace = 0)
+    }
+
+    @Test
+    fun whileTheSetsAreNamedByPubkeyNothingIsWritten() {
+        // The server's claim before its switch: the sets here are not the ones this service writes.
+        stores.redis.resource.use { it.set("migration:redis_sets:naming", "pubkeys") }
+        relay.load(Corpus().events)
+        streamer.start()
+        Thread.sleep(15_000)
+        assertTrue(streamer.alive)
+        assertEquals(0, stores.count("MATCH (u:NostrUser) RETURN count(u)"))
+        assertEquals(setOf("migration:redis_sets:naming"), stores.redis.resource.use { it.keys("*") })
+
+        val started = System.currentTimeMillis() / 1000
+        stores.redis.resource.use { it.set("migration:redis_sets:naming", "ids") }
+        val state = stores.awaitAudit(started, streamer = streamer)
+        assertEquals("true", state["audit_complete"], "$state")
+        assertOracle(relay)
+    }
+
+    @Test
     fun aRestartResumesTheLiveStream() {
         val corpus = Corpus()
         rebuild(corpus.events)
@@ -313,10 +352,10 @@ class EndToEndTest {
         stores.redis.resource.use { r ->
             val keys = r.keys("followed_by:*").shuffled(rnd)
             keys.take(20).forEach { r.del(it) } // evicted
-            keys.drop(20).take(20).forEach { r.sadd(it, Signer().pubkey) } // a member Neo4j lacks
+            keys.drop(20).take(20).forEach { r.sadd(it, "900000001") } // a member Neo4j lacks
             keys.drop(40).take(20).forEach { k -> r.spop(k) } // a member lost
-            r.sadd("followed_by:" + Signer().pubkey, Signer().pubkey) // a set with no edge at all
-            r.sadd("designates:" + Signer().pubkey, Signer().pubkey)
+            r.sadd("followed_by:900000002", "900000001") // a set with no edge at all
+            r.sadd("designates:900000002", "900000001")
         }
         assertNotEquals(0, oracle(relay).first, "the damage is visible")
         stores.driver.session().use { it.run("MATCH (s:GraphStreamerState) REMOVE s.redis_reconciled_at").consume() }
