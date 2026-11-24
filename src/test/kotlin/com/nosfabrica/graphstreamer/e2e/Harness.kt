@@ -338,6 +338,8 @@ fun serverBuild(
             E2E.redisPort.toString(),
             "--relay",
             relay.url,
+            "--scorecard-db-url",
+            "postgresql+asyncpg://${E2E.pgUser}:${E2E.pgPassword}@${E2E.pgHost}:${E2E.pgPort}/${E2E.pgDb}",
         ).redirectErrorStream(true).start()
     val out = p.inputStream.bufferedReader().readText()
     check(p.waitFor() == 0) { "server_build.py failed:\n$out" }

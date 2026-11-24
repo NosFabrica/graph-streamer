@@ -46,6 +46,8 @@ GS_E2E=1 GS_E2E_PYTHON=/tmp/verify-venv/bin/python BRAINSTORM_SERVER_DIR=../brai
 
 The migration and concurrent-writer scenarios also need a Python with brainstorm_server's
 dependencies (its `pyproject.toml`), as `GS_E2E_SERVER_PYTHON`; without it they are skipped.
+The migration scenario runs the server's consumer with `SCORES_IN_POSTGRES` on, so
+`BRAINSTORM_SERVER_DIR` must be a checkout that has it.
 
 | Variable | Default | |
 |---|---|---|
