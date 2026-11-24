@@ -87,7 +87,7 @@ Each test's service log is in `build/e2e-logs/<test>.log`.
 | `twoIdCallsRacingAgree` | Eight concurrent id calls for the same new pubkeys return the same ids. |
 | `aDryRunNeedsNoScorecardDatabase`, `writingWithoutAScorecardDatabaseRefusesToStart` | A dry run starts without the connection and asks for no ids; write mode without it stops at boot. |
 | `aServerBuiltGraphMigrates` | A graph built by the server's consumer (stale versions applied last, lists and reports the relay never had, a list deletion it never applied) becomes exactly the relay's, every kind adopted. |
-| `otherWritersOnTheSameNodes` | The GrapeRank write-back and the profile resolver writing the same nodes for two minutes: no failed batch on either side, an exact graph. |
+| `otherWritersOnTheSameNodes` | The profile resolver writing the same nodes for two minutes, and numbering signers the audit has yet to create: no failed batch on either side, every node holds the id `nostr_user` gives it, an exact graph. |
 | `aDryRunWritesNothing` | `DRY_RUN=true`: one state node, no edge, an empty Redis. |
 
 Each fix these scenarios drove was checked by disabling it and watching its scenario fail.

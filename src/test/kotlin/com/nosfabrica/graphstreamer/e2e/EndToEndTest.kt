@@ -427,13 +427,15 @@ class EndToEndTest {
     }
 
     /**
-     * The GrapeRank write-back (the server's set_observer_scores) and the profile resolver
-     * (its Cypher) writing the same nodes, for two minutes, while the first audit writes edges.
+     * The profile resolver (its Cypher, its id call) writing the same nodes for two minutes
+     * while the first audit writes edges, and numbering signers the audit has yet to create.
      */
     @Test
     fun otherWritersOnTheSameNodes() {
         assumeTrue(E2E.serverPython != null, "GS_E2E_SERVER_PYTHON runs the other writers")
-        relay.load(bigCorpus(15_000, 60))
+        val corpus = bigCorpus(15_000, 60)
+        relay.load(corpus)
+        val upcoming = File(dir, "signers.txt").also { f -> f.writeText(corpus.joinToString("\n") { it.pubKey }) }
         val started = now
         streamer.start(mapOf("AUDIT_WINDOW" to "2000"))
         waitFor(120, "the first audit to start writing") { stores.count("MATCH ()-[r:FOLLOWS]->() RETURN count(r)") > 10_000 }
@@ -447,6 +449,10 @@ class EndToEndTest {
                 E2E.neo4jUrl,
                 "--neo4j-password",
                 E2E.neo4jPassword,
+                "--scorecard-db-url",
+                "postgresql+asyncpg://${E2E.pgUser}:${E2E.pgPassword}@${E2E.pgHost}:${E2E.pgPort}/${E2E.pgDb}",
+                "--signers",
+                upcoming.absolutePath,
                 "--seconds",
                 "120",
             ).redirectErrorStream(true).start()
@@ -455,11 +461,13 @@ class EndToEndTest {
         writers.waitFor()
         println(out.lines().last { it.isNotBlank() })
         assertEquals(0, writers.exitValue(), out)
-        assertTrue(out.contains("'scores_failed': 0") && out.contains("'resolver_failed': 0"), out)
+        assertTrue(out.contains("'resolver_failed': 0") && out.contains("'id_mismatches': 0"), out)
         assertEquals("true", state["audit_complete"], "$state")
         val log = streamer.logText()
         assertTrue(!log.contains("failed") || !Regex("applying .* failed|audit failed|reconcile failed").containsMatchIn(log), log.takeLast(3000))
         assertTrue(stores.count("MATCH ()-[r:ZAPS_VIA]->() RETURN count(r)") > 0, "the resolver wrote")
+        assertTrue(!log.contains("hold a user_id other than"), log.takeLast(3000))
+        assertEveryNodeHasItsId()
         assertOracle(relay)
     }
 
