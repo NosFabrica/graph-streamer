@@ -6,8 +6,10 @@ import com.nosfabrica.graphstreamer.store.AuthorSource
 import com.nosfabrica.graphstreamer.store.EdgeChange
 import com.nosfabrica.graphstreamer.store.GraphStore
 import com.nosfabrica.graphstreamer.store.IncompleteRead
-import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.nosfabrica.graphstreamer.store.RedisRepair
+import com.nosfabrica.graphstreamer.store.WriteGate
+import com.vitorpamplona.quartz.nip01Core.core.Event
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -25,6 +27,9 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Every write is read-compute-write under one lock, so the two never interleave on an author.
  * With [dryRun] the changes are counted and logged, and the graph is not touched.
+ *
+ * While [gate] is closed (`ingest:hold`) nothing is read or written: each way in waits, so the
+ * live stream takes no further batch and its resume point stays where the last write left it.
  */
 class Projector(
     private val graph: GraphStore,
@@ -33,6 +38,8 @@ class Projector(
     /** Authors recomputed from the relay per read. */
     val batchSize: Int,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
+    private val gate: WriteGate = WriteGate { true },
+    private val gatePollMs: Long = 5_000,
 ) {
     private val log = LoggerFactory.getLogger(Projector::class.java)
     private val lock = Mutex()
@@ -52,7 +59,7 @@ class Projector(
         if (graphEvents.isEmpty()) return emptyList()
         val byAuthor = graphEvents.groupBy { it.pubKey }
         val ignored = ArrayList<Ignored>()
-        lock.withLock {
+        writing {
             val current = graph.read(byAuthor.keys.toList())
             val now = clock()
             // A report adds its targets to the ones held, which is right only if the held ones are
@@ -106,8 +113,8 @@ class Projector(
      * many. Throws, writing nothing, unless the relay's answer drained.
      */
     suspend fun recompute(authors: List<String>): Int =
-        lock.withLock {
-            if (authors.isEmpty()) return@withLock 0
+        writing {
+            if (authors.isEmpty()) return@writing 0
             // Throws IncompleteRead unless the relay drained: half an answer would read as deletions.
             val byAuthor = source.currentEvents(authors).groupBy { it.pubKey }
             val current = graph.read(authors)
@@ -122,13 +129,26 @@ class Projector(
         }
 
     /** Replays the Redis writes a crash cut off (the outbox). Nothing in a dry run. */
-    suspend fun repairRedis(): Int = if (dryRun) 0 else lock.withLock { graph.repairPendingRedis() }
+    suspend fun repairRedis(): Int = if (dryRun) 0 else writing { graph.repairPendingRedis() }
 
     /**
      * Makes every Redis set match Neo4j, a batch at a time under the lock, so writes go on between
      * batches. Blocking: call it on an IO thread. Nothing in a dry run.
      */
-    fun reconcileRedis(): RedisRepair? = if (dryRun) null else graph.reconcileRedis { batch -> runBlocking { lock.withLock { batch() } } }
+    fun reconcileRedis(): RedisRepair? = if (dryRun) null else graph.reconcileRedis { batch -> runBlocking { writing { batch() } } }
+
+    /** Under the lock, once the gate is open. A dry run writes nothing, so it never waits. */
+    private suspend fun <T> writing(block: suspend () -> T): T =
+        lock.withLock {
+            var waited = false
+            while (!dryRun && !gate.open()) {
+                if (!waited) log.warn("writes are held (ingest:hold, or the Redis sets are not named by User id); waiting")
+                waited = true
+                delay(gatePollMs)
+            }
+            if (waited) log.info("writes resumed")
+            block()
+        }
 
     private fun change(
         author: String,

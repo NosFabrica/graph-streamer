@@ -40,8 +40,8 @@ These names are a contract with brainstorm_server and the GrapeRank worker.
 | `DESIGNATES` | newest kind 10040 | public rows named `<kind>[:<tag>]`, never the author's own key |
 
 **User ids:** every node this service creates carries `user_id`, its id from `nostr_user` in
-the Scorecard database (the server owns that table). Ids for a batch's authors and added
-targets are committed there before the Neo4j transaction, which sets `user_id` only where a
+the Scorecard database (the server owns that table). Ids for everyone a batch names are
+committed there before the Neo4j transaction, which sets `user_id` only where a
 node has none. An id is never overwritten: a node holding a different one is left and logged.
 
 **Neo4j bookkeeping**, on the author's node, in the same transaction as the edges:
@@ -50,7 +50,13 @@ node has none. An id is never overwritten: a node holding a different one is lef
 (`"<created_at>:<id>"` per report, note reports included).
 
 **Redis:** `followed_by:<target>`, `muted_by:<target>`, `reported_by:<target>` (reverse sets) and
-`designates:<author>` (forward set). Always a copy of Neo4j, repaired from it when they differ.
+`designates:<author>` (forward set). Every user is named by User id, in the key and in the
+members (`followed_by:42` holds ids), as brainstorm_server names them with `SCORES_IN_POSTGRES`.
+Always a copy of Neo4j, repaired from it when they differ.
+
+**Hold:** nothing is written while Redis holds `ingest:hold` (the server's key; an operator sets
+and deletes it), or while `migration:redis_sets:naming` claims the pubkey naming. The live stream
+takes no further batch and its resume point does not move; writing resumes when the key goes.
 
 **Own state:** one `(:GraphStreamerState {name: "graph-streamer"})` node (resume point, audit
 report). See [DESIGN.md](DESIGN.md#state-node).
@@ -80,7 +86,8 @@ report). See [DESIGN.md](DESIGN.md#state-node).
 
 Run exactly **one replica**: it must be the only writer of these edges. It needs the
 `NostrUser.pubkey` and `NostrUser.user_id` uniqueness constraints (it creates them if missing)
-and the server's `nostr_user` table. CI publishes
+and the server's `nostr_user` table, and a server, worker and profile resolver running with
+`SCORES_IN_POSTGRES` (they read the sets by User id). CI publishes
 `ghcr.io/nosfabrica/graph-streamer` on every push (branch, `sha-<short>`, `latest` on `main`).
 
 ## Cutover

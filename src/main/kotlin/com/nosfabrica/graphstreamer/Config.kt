@@ -47,7 +47,8 @@ data class Config(
     /** Authors recomputed from the relay per batch. */
     val projectBatch: Int = 200,
     /**
-     * Where every node this service creates gets its User id (brainstorm_server's `nostr_user`).
+     * Where every node this service creates gets its User id (brainstorm_server's `nostr_user`),
+     * which is also its name in the Redis sets.
      * Required to write; never read in a dry run.
      */
     val scorecardDb: ScorecardDb? = null,

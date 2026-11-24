@@ -10,7 +10,7 @@ found too), it reads everything the relay holds for them and compares, per kind:
     events skipped; REPORTS from every p-only report),
   - the bookkeeping (the list head the graph records is the relay's newest),
   - the Redis copies (followed_by:/muted_by:/reported_by:<target> hold the author; designates:<author>
-    is the DESIGNATES set).
+    is the DESIGNATES set), every user named by User id (the node's `user_id`) in key and member.
 
 Then, over the whole graph: every Redis reverse set's size against the Neo4j edge counts.
 
@@ -37,6 +37,7 @@ from neo4j import GraphDatabase
 KINDS = {3: ("FOLLOWS", "follows", "followed_by:"), 10000: ("MUTES", "mutes", "muted_by:"), 10040: ("DESIGNATES", "designations", None)}
 REPORTS = 1984
 UNRANKED = "include:spam"
+USER_ID = re.compile(r"[0-9]{1,10}")
 
 
 def load_server_parsers(server_dir):
@@ -135,7 +136,7 @@ def graph_state(driver, authors):
             r["a"]: r
             for r in s.run(
                 """UNWIND $authors AS a MATCH (u:NostrUser {pubkey: a})
-                   RETURN a, u.follows_event AS follows_event, u.follows_at AS follows_at,
+                   RETURN a, u.user_id AS id, u.follows_event AS follows_event, u.follows_at AS follows_at,
                           u.mutes_event AS mutes_event, u.mutes_at AS mutes_at,
                           u.designations_event AS designations_event, u.designations_at AS designations_at,
                           u.report_events AS report_events""",
@@ -143,13 +144,17 @@ def graph_state(driver, authors):
             )
         }
         edges = defaultdict(lambda: defaultdict(set))
+        ids = {a: str(r["id"]) for a, r in heads.items() if r["id"] is not None}
         for r in s.run(
-            """UNWIND $authors AS a MATCH (:NostrUser {pubkey: a})-[r:FOLLOWS|MUTES|REPORTS|DESIGNATES]->(t:NostrUser)
-               RETURN a, type(r) AS rel, t.pubkey AS t""",
+            """UNWIND $authors AS a MATCH (u:NostrUser {pubkey: a})-[r:FOLLOWS|MUTES|REPORTS|DESIGNATES]->(t:NostrUser)
+               RETURN a, u.user_id AS id, type(r) AS rel, t.pubkey AS t, t.user_id AS tid""",
             authors=authors,
         ):
             edges[r["a"]][r["rel"]].add(r["t"])
-    return heads, edges
+            for pubkey, user_id in ((r["a"], r["id"]), (r["t"], r["tid"])):
+                if user_id is not None:
+                    ids[pubkey] = str(user_id)
+    return heads, edges, ids
 
 
 def main():
@@ -224,9 +229,16 @@ async def check(args, p_tags, report_targets, designated, driver, r, now, horizo
             by_author = defaultdict(list)
             for e in events:
                 by_author[e["pubkey"]].append(e)
-            heads, edges = graph_state(driver, chunk)
+            heads, edges, ids = graph_state(driver, chunk)
             pipe = r.pipeline()
             redis_checks = []
+
+            def name(pubkey):
+                """A user's name in the Redis sets; without a user_id, one no set can hold."""
+                if pubkey not in ids:
+                    problem("node in an edge has no user_id", pubkey)
+                return ids.get(pubkey, "no-user-id:" + pubkey)
+
             for a in chunk:
                 mine = [e for e in by_author[a] if (expiration(e) or now + 1) > now]
                 head = heads.get(a)
@@ -252,11 +264,11 @@ async def check(args, p_tags, report_targets, designated, driver, r, now, horizo
                         problem(f"{rel}: edges differ", f"{a} missing={len(want - have)} extra={len(have - want)}")
                     if prefix:
                         for t in have:
-                            pipe.sismember(prefix + t, a)
+                            pipe.sismember(prefix + name(t), name(a))
                             redis_checks.append((f"{prefix}<target> lacks the author", f"{a} -> {t}"))
-                    else:
-                        pipe.smembers("designates:" + a)
-                        redis_checks.append(("designates:<author> differs", (a, have)))
+                    elif have or a in ids:
+                        pipe.smembers("designates:" + name(a))
+                        redis_checks.append(("designates:<author> differs", (a, {name(t) for t in have})))
                 reports = [e for e in mine if e["kind"] == REPORTS and e["created_at"] <= horizon]
                 in_slice = set().union(*[report_targets(e) for e in reports if e["created_at"] >= args.since]) if reports else set()
                 every = set().union(*[report_targets(e) for e in reports]) if reports else set()
@@ -266,7 +278,7 @@ async def check(args, p_tags, report_targets, designated, driver, r, now, horizo
                     if not (in_slice <= have <= every):
                         problem("REPORTS: edges differ", f"{a} missing={len(in_slice - have)} extra={len(have - every)}")
                     for t in have:
-                        pipe.sismember("reported_by:" + t, a)
+                        pipe.sismember("reported_by:" + name(t), name(a))
                         redis_checks.append(("reported_by:<target> lacks the author", f"{a} -> {t}"))
             for (label, detail), result in zip(redis_checks, pipe.execute()):
                 if label.startswith("designates"):
@@ -294,14 +306,18 @@ def orphans(driver, problem):
 def global_counts(driver, r, problem):
     """Over the whole graph, per target: its in-degree of each edge type in Neo4j against the size
     of its Redis set (per author for designates:), and sets for nodes that have no such edge.
-    Per key, so an error on one side can't hide behind an error on the other in a total."""
+    Per key, so an error on one side can't hide behind an error on the other in a total.
+    Keys are User ids; a set under any other name is reported."""
     pairs = {"FOLLOWS": ("followed_by:", "<-"), "MUTES": ("muted_by:", "<-"), "REPORTS": ("reported_by:", "<-"), "DESIGNATES": ("designates:", "->")}
     for rel, (prefix, direction) in pairs.items():
         pattern = f"(u)<-[:{rel}]-()" if direction == "<-" else f"(u)-[:{rel}]->()"
         degrees = {}
         with driver.session() as s:
-            for rec in s.run(f"MATCH (u:NostrUser) WITH u, COUNT {{ {pattern} }} AS n WHERE n > 0 RETURN u.pubkey AS k, n"):
-                degrees[rec["k"]] = rec["n"]
+            for rec in s.run(f"MATCH (u:NostrUser) WITH u, COUNT {{ {pattern} }} AS n WHERE n > 0 RETURN u.user_id AS k, n"):
+                if rec["k"] is None:
+                    problem(f"global: node with {rel} edges has no user_id", str(rec["n"]))
+                    continue
+                degrees[str(rec["k"])] = rec["n"]
         keys = list(degrees)
         sizes = {}
         for i in range(0, len(keys), 10000):
@@ -315,7 +331,7 @@ def global_counts(driver, r, problem):
         for k in (k for k in keys if degrees[k] != sizes[k]):
             for attempt in range(3):
                 with driver.session() as s:
-                    n = s.run(f"MATCH (u:NostrUser {{pubkey: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=k).single()["n"]
+                    n = s.run(f"MATCH (u:NostrUser {{user_id: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=int(k)).single()["n"]
                 c = r.scard(prefix + k)
                 if n == c:
                     break
@@ -327,10 +343,13 @@ def global_counts(driver, r, problem):
             k = key[len(prefix) :]
             if k in degrees:
                 continue
+            if not USER_ID.fullmatch(k):
+                problem(f"global: {prefix} set not named by a User id", key)
+                continue
             # A key made after the degree pass (a target newly followed, on a graph being written)
             # isn't in it: ask Neo4j now, then Redis again, before calling the set an orphan.
             with driver.session() as s:
-                n = s.run(f"MATCH (u:NostrUser {{pubkey: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=k).single()
+                n = s.run(f"MATCH (u:NostrUser {{user_id: $k}}) RETURN COUNT {{ {pattern} }} AS n", k=int(k)).single()
             if (n["n"] if n else 0) == 0 and r.scard(key) > 0:
                 orphan_sets += 1
                 problem(f"global: {prefix} set with no {rel} edge in Neo4j", key)

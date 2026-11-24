@@ -89,19 +89,35 @@ would download them every time. The `*_at` and `*_event` properties get range in
 ## Redis
 
 Reverse sets get SADD/SREM as edges change; `designates:<author>` is replaced whole in one MULTI.
+Keys and members are User ids. A write takes them from `nostr_user`, in the call that numbers
+its nodes; the outbox records pubkeys and resolves them the same way when replayed; the reconcile
+reads `user_id` off the nodes. A node whose `user_id` differs from `nostr_user`'s (logged when
+met, never overwritten) is therefore named two ways and its sets are replaced at every reconcile.
+
 Written after Neo4j and kept a copy of it two ways:
 
 - **Outbox.** The transaction that writes an author's edges labels the node
   `GraphStreamerRedisPending` and records lost targets (`redis_pending_removed`); the label goes
   once Redis has the change. Startup replays whoever still has it.
 - **Reconcile.** Each set's size against its key's edge count in Neo4j; a differing set is
-  replaced, a set with no edge deleted, a batch at a time under the writer's lock. Runs when the
+  replaced, a set with no edge deleted, a batch at a time under the writer's lock. A key that is
+  not a User id is left alone: it is not this service's. Runs when the
   marker `graph_streamer:redis_reconciled_at` is missing (Redis empty, flushed, or built by the
   server's consumer) and every `REDIS_AUDIT_EVERY_HOURS`.
 
 Production runs `allkeys-lru` at `maxmemory 24gb`. At full size these sets would be evicted, and
 an evicted set reads as empty to GrapeRank. Size Redis for them or use `volatile-lru` (they carry
 no TTL) before cutover.
+
+## Hold
+
+`Projector` asks the gate (`RedisIngestHold`) before every read-compute-write, under its lock:
+closed while `ingest:hold` exists, or while `migration:redis_sets:naming` is set to anything but
+`ids`. Closed, it polls every 5 s and nothing else happens: the live batch in hand is kept, no
+further batch is taken (the write sits inside `collect`), so the resume point stays at the last
+batch written; audits, the outbox and the reconcile wait at their next write. The hold is for
+the windows in which the server renames the sets or Neo4j is rebuilt. A write already under way
+when the key is set finishes. A dry run never waits.
 
 ## State node
 

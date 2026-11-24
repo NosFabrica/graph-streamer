@@ -6,6 +6,9 @@ import com.nosfabrica.graphstreamer.projection.ListKind
 import com.nosfabrica.graphstreamer.projection.Projector
 import com.nosfabrica.graphstreamer.store.IncompleteRead
 import com.vitorpamplona.quartz.nip01Core.core.Event
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -18,6 +21,7 @@ import kotlin.test.assertTrue
  * marks its author, who is recomputed from the relay, which has already applied it.
  * The fake relay here holds what the real one would serve after doing so.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ProjectionTest {
     private val graph = FakeGraph()
     private val relay = FakeRelay()
@@ -38,6 +42,34 @@ class ProjectionTest {
     private suspend fun auditFindsGone(author: String) {
         projector().recompute(listOf(author))
     }
+
+    @Test
+    fun whileWritesAreHeldNothingIsReadOrWrittenAndTheBatchIsNotLost() =
+        runTest {
+            var held = true
+            val projector = Projector(graph, relay, dryRun = false, batchSize = 100, clock = { now }, gate = { !held }, gatePollMs = 1_000)
+            val list = alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)
+            val applying = launch { projector.apply(listOf(list)) }
+            val recomputing = launch { projector.recompute(listOf(alice.pubkey)) }
+            advanceTimeBy(60_000)
+            assertTrue(applying.isActive && recomputing.isActive, "both wait")
+            assertTrue(graph.writes.isEmpty())
+            assertEquals(0, relay.reads)
+
+            relay.events += list
+            held = false
+            advanceTimeBy(2_000)
+            assertTrue(applying.isCompleted && recomputing.isCompleted)
+            assertEquals(setOf(hex(1)), graph.edges(alice.pubkey, Edge.FOLLOWS))
+        }
+
+    @Test
+    fun aDryRunDoesNotWaitForTheHold() =
+        runTest {
+            val projector = Projector(graph, relay, dryRun = true, batchSize = 100, clock = { now }, gate = { false })
+            projector.apply(listOf(alice.event(3, listOf(listOf("p", hex(1))), createdAt = t0)))
+            assertEquals(1, projector.eventsApplied.get())
+        }
 
     @Test
     fun aFollowListBecomesEdgesAndIsRecorded() =

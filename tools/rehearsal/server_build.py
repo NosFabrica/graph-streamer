@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Builds a graph the way production's was built: every event, in the order given, through
-brainstorm_server's own consumer (process_strfry_event), into Neo4j and Redis. The input to a
+brainstorm_server's own consumer (process_strfry_event), into Neo4j and Redis, with
+SCORES_IN_POSTGRES on: nodes carry user_id and the Redis sets are named by it. The input to a
 migration rehearsal: graph-streamer then takes over this graph, and tools/verify checks the result.
 
 Run with a Python that has brainstorm_server's dependencies (pyproject.toml), from anywhere:
 
   server_build.py --server-dir ../brainstorm_server --events events.jsonl \
-      --neo4j bolt://127.0.0.1:7688 --neo4j-password ... --redis-port 6380 --relay ws://127.0.0.1:PORT
+      --neo4j bolt://127.0.0.1:7688 --neo4j-password ... --redis-port 6380 --relay ws://127.0.0.1:PORT \
+      --scorecard-db-url postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5441/scorecard
 
 --relay is what the server's kind-5 handler reads reports back from (NOSTR_TRANSFER_TO_RELAY).
 """
@@ -28,6 +30,7 @@ def main():
     ap.add_argument("--redis-host", default="127.0.0.1")
     ap.add_argument("--redis-port", required=True)
     ap.add_argument("--relay", required=True)
+    ap.add_argument("--scorecard-db-url", required=True, help="where nostr_user lives")
     args = ap.parse_args()
 
     # The settings the consumer's modules read at import; the rest only need to parse.
@@ -42,6 +45,9 @@ def main():
         "NOSTR_UPLOAD_TA_EVENTS_RELAY": args.relay,
         "NOSTR_UPLOAD_TA_EVENTS_RELAY_PUBLIC_URL": args.relay,
         "DB_URL": "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused",
+        "SCORECARD_DB_URL": args.scorecard_db_url,
+        "USER_IDS_ENABLED": "true",
+        "SCORES_IN_POSTGRES": "true",
         "DEPLOY_ENVIRONMENT": "rehearsal",
         "AUTH_ALGORITHM": "HS256",
         "AUTH_SECRET_KEY": "rehearsal",
@@ -65,12 +71,13 @@ def main():
 async def build(args):
     from neo4j import AsyncGraphDatabase
 
-    from app.message_queue_tasks.process_strfry_event import create_pubkey_index, process_strfry_event
+    from app.message_queue_tasks.process_strfry_event import process_strfry_event
+    from app.neo4j_db.schema import ensure_schema
 
     driver = AsyncGraphDatabase.driver(args.neo4j, auth=(args.neo4j_user, args.neo4j_password))
     applied = 0
     async with driver.session() as session:
-        await create_pubkey_index(session)
+        await ensure_schema(session)
         with open(args.events) as f:
             for line in f:
                 if line.strip():
